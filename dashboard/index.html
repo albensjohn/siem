@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SENTINEL | Active Defense</title>
+    <link rel="stylesheet" href="style.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+</head>
+<body>
+
+    <nav class="sidebar">
+        <div class="brand">
+            <i class="fa-solid fa-shield-virus"></i> SENTINEL
+        </div>
+        
+        <div class="status-panel">
+            <div class="status-item">
+                <span id="mgr-status" class="dot offline"></span> Manager
+            </div>
+            <div class="status-item">
+                <span id="idx-status" class="dot offline"></span> Indexer
+            </div>
+        </div>
+
+        <div class="menu-section">
+            <h3><i class="fa-solid fa-server"></i> AGENTS</h3>
+            <div id="agent-list" class="scroll-box">
+                <div class="loading-text">Scanning network...</div>
+            </div>
+        </div>
+
+        <div class="menu-section">
+            <h3><i class="fa-solid fa-brain"></i> AI THREATS</h3>
+            <div id="ai-feed" class="scroll-box">
+                <div class="loading-text">Waiting for AI Engine...</div>
+            </div>
+        </div>
+    </nav>
+
+    <main class="main-content">
+        <header>
+            <h1>Security Operations Center</h1>
+            <div class="user-profile">
+                <span>Administrator</span>
+                <i class="fa-solid fa-circle-user"></i>
+            </div>
+        </header>
+
+        <div class="kpi-grid">
+            <div class="card kpi">
+                <div class="icon-box blue"><i class="fa-solid fa-desktop"></i></div>
+                <div>
+                    <h3>Total Agents</h3>
+                    <h2 id="kpi-agents">0</h2>
+                </div>
+            </div>
+            <div class="card kpi">
+                <div class="icon-box green"><i class="fa-solid fa-check-shield"></i></div>
+                <div>
+                    <h3>Events (24h)</h3>
+                    <h2 id="kpi-alerts">0</h2>
+                </div>
+            </div>
+            <div class="card kpi">
+                <div class="icon-box red"><i class="fa-solid fa-triangle-exclamation"></i></div>
+                <div>
+                    <h3>Critical Risks</h3>
+                    <h2 id="kpi-risks">0</h2>
+                </div>
+            </div>
+        </div>
+
+        <div class="card table-card">
+            <div class="card-header">
+                <h2><i class="fa-solid fa-list-ul"></i> Live Security Events (Indexer Stream)</h2>
+                <span class="live-badge">LIVE</span>
+            </div>
+            <table>
+                <thead>
+                    <tr>
+                        <th width="10%">Level</th>
+                        <th width="15%">Time</th>
+                        <th width="20%">Agent</th>
+                        <th>Description</th>
+                    </tr>
+                </thead>
+                <tbody id="alert-table-body">
+                    <tr><td colspan="4" class="text-center">Connecting to OpenSearch Database...</td></tr>
+                </tbody>
+            </table>
+        </div>
+    </main>
+
+    <script src="app.js"></script>
+</body>
+</html>

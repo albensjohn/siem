@@ -1,0 +1,13 @@
+nodes:
+  # Wazuh indexer server nodes
+  indexer:
+    - name: wazuh.indexer
+      ip: wazuh.indexer
+
+  # Wazuh server nodes
+  # Use node_type only with more than one Wazuh manager
+  server:
+    - name: wazuh.manager
+      ip: wazuh.manager
+
+
