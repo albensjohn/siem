@@ -183,7 +183,7 @@ function updateFooterStatus() {
   if (!footer) return;
   const mgrOnline = !!liveState.mgrToken;
   const idxOnline = liveState.alerts.length > 0;
-  const aiOnline = Object.keys(liveState.aiRisks).length > 0;
+  const aiOnline = Array.isArray(liveState.aiRisks.agents) && liveState.aiRisks.agents.length > 0;
   const mgrDot = mgrOnline ? '<span class="footer-dot"></span>' : '<span class="footer-dot" style="background:#FF2E63"></span>';
   const idxDot = idxOnline ? '<span class="footer-dot"></span>' : '<span class="footer-dot" style="background:#FF2E63"></span>';
   const aiDot = aiOnline ? '<span class="footer-dot cyan"></span>' : '<span class="footer-dot" style="background:#f97316"></span>';
@@ -582,7 +582,20 @@ function buildNexusTab() {
 
 function initNexusTab() {
   const bar = document.getElementById('nexus-risk-bar');
-  if (bar) bar.style.width = '12.4%';
+  // --- LIVE: use global_risk from AI engine (0–1 scale → %) ---
+  const globalRisk = liveState.aiRisks.global_risk;
+  if (bar) {
+    const pct = globalRisk != null ? (globalRisk * 100).toFixed(1) : 12.4;
+    bar.style.width = pct + '%';
+    const riskNote = document.querySelector('.nexus-risk-note');
+    const riskVal = document.querySelector('.nexus-stat-value.cyan');
+    if (riskVal) riskVal.innerHTML = `${pct} <span class="sub">/100</span>`;
+    if (riskNote) {
+      const status = liveState.aiRisks.status || 'OK';
+      const label = globalRisk >= 0.8 ? 'CRITICAL threat level' : globalRisk >= 0.6 ? 'HIGH risk detected' : globalRisk >= 0.4 ? 'MEDIUM risk — monitor' : 'Low threat trajectory confirmed';
+      riskNote.textContent = status === 'LEARNING' ? 'AI Engine warming up — collecting baseline...' : status === 'DEGRADED' ? 'AI Engine degraded — showing last known state' : label;
+    }
+  }
 
   // --- LIVE: populate activity stream ---
   if (liveState.alerts.length > 0) {
@@ -721,55 +734,84 @@ function buildHunterTab() {
 }
 
 function initHunterTab() {
-  // --- LIVE: inject AI risk cards from ai_risks.json ---
+  // --- LIVE: inject AI risk cards from new schema {timestamp, global_risk, agents:[...]} ---
   const feedEl = document.querySelector('.hunter-feed');
-  if (feedEl && Object.keys(liveState.aiRisks).length > 0) {
-    const riskEntries = Object.entries(liveState.aiRisks).filter(([k]) => k !== 'System');
-    if (riskEntries.length > 0) {
-      const liveCards = riskEntries.map(([agent, risk], i) => {
-        const sev = risk.status === 'CRITICAL' ? 'high' : risk.status === 'HIGH' ? 'medium' : 'low';
-        const isActive = i === 0 && selectedAlertId === 1;
-        return `
-          <div class="glass-card hunter-alert-card ${isActive ? 'active' : ''}" data-alert-id="live-${i}" style="cursor:pointer">
-            <div class="hunter-alert-top">
-              <span class="hunter-score ${sev}">Score: ${risk.risk_score}</span>
-              <span class="hunter-alert-time">live</span>
-            </div>
-            <div class="hunter-alert-type">${agent}</div>
-            <div class="hunter-alert-desc">${risk.description || `Status: ${risk.status} — Anomalies: ${risk.anomalies}`}</div>
-          </div>`;
-      }).join('');
-      feedEl.innerHTML = `<div class="hunter-feed-title">${lucideIcon('brain', 14)} AI Analysis Feed (Live)</div>${liveCards}`;
+  const liveAgents = liveState.aiRisks.agents;
+  const engineStatus = liveState.aiRisks.status;
 
-      // Update inspector with first live risk
-      const [firstAgent, firstRisk] = riskEntries[0];
-      const typeEl = document.getElementById('inspector-type');
-      const descEl = document.getElementById('inspector-desc');
-      const targetEl = document.getElementById('inspector-target');
-      const eventsEl = document.getElementById('inspector-events');
-      const rawEl = document.getElementById('inspector-raw');
-      const actionEl = document.getElementById('inspector-action');
-      const scoreEl = document.getElementById('gauge-score');
-      if (typeEl) typeEl.textContent = firstAgent;
-      if (descEl) descEl.textContent = firstRisk.description || `Status: ${firstRisk.status}`;
-      if (targetEl) targetEl.textContent = firstAgent;
-      if (eventsEl) eventsEl.textContent = firstRisk.anomalies;
-      if (rawEl) rawEl.textContent = JSON.stringify(firstRisk, null, 2);
-      if (actionEl) actionEl.textContent = firstRisk.status === 'CRITICAL'
-        ? `Isolate ${firstAgent} immediately — risk score ${firstRisk.risk_score}/100`
-        : `Monitor ${firstAgent} — risk score ${firstRisk.risk_score}/100`;
-      if (scoreEl) scoreEl.textContent = firstRisk.risk_score;
-    }
-  }
+  if (feedEl && Array.isArray(liveAgents) && liveAgents.length > 0) {
+    const liveCards = liveAgents.map((entry, i) => {
+      const sev = entry.risk === 'CRITICAL' ? 'high' : entry.risk === 'HIGH' ? 'medium' : 'low';
+      const scorePct = Math.round(entry.score * 100);
+      const isActive = i === 0;
+      return `
+        <div class="glass-card hunter-alert-card ${isActive ? 'active' : ''}" data-live-index="${i}" style="cursor:pointer">
+          <div class="hunter-alert-top">
+            <span class="hunter-score ${sev}">Score: ${scorePct}</span>
+            <span class="hunter-alert-time">live</span>
+          </div>
+          <div class="hunter-alert-type">${entry.agent}</div>
+          <div class="hunter-alert-desc">Risk: ${entry.risk} — Dominant signal: ${entry.dominant_feature || '—'}</div>
+        </div>`;
+    }).join('');
 
-  // Wire alert card clicks
-  document.querySelectorAll('.hunter-alert-card').forEach(card => {
-    card.addEventListener('click', () => {
-      selectedAlertId = parseInt(card.dataset.alertId) || 1;
-      renderTab('hunter');
-      setTimeout(initHunterTab, 50);
+    const statusLabel = engineStatus === 'LEARNING' ? ' (Warming Up)' : engineStatus === 'DEGRADED' ? ' (Degraded)' : ' (Live)';
+    feedEl.innerHTML = `<div class="hunter-feed-title">${lucideIcon('brain', 14)} AI Analysis Feed${statusLabel}</div>${liveCards}`;
+
+    // Populate inspector with first agent
+    const first = liveAgents[0];
+    const scorePct = Math.round(first.score * 100);
+    const typeEl = document.getElementById('inspector-type');
+    const descEl = document.getElementById('inspector-desc');
+    const targetEl = document.getElementById('inspector-target');
+    const eventsEl = document.getElementById('inspector-events');
+    const rawEl = document.getElementById('inspector-raw');
+    const actionEl = document.getElementById('inspector-action');
+    const scoreEl = document.getElementById('gauge-score');
+    if (typeEl) typeEl.textContent = first.agent;
+    if (descEl) descEl.textContent = `Risk: ${first.risk} — Dominant signal: ${first.dominant_feature || 'none'}. Timestamp: ${liveState.aiRisks.timestamp || '—'}`;
+    if (targetEl) targetEl.textContent = first.agent;
+    if (eventsEl) eventsEl.textContent = `${first.features ? Object.values(first.features).reduce((a, b) => a + b, 0) : '—'} events`;
+    if (rawEl) rawEl.textContent = JSON.stringify(first, null, 2);
+    if (actionEl) actionEl.textContent = first.risk === 'CRITICAL' || first.risk === 'HIGH'
+      ? `Investigate ${first.agent} immediately — anomaly score ${first.score.toFixed(3)}, trigger: ${first.dominant_feature}`
+      : `Monitor ${first.agent} — risk ${first.risk}, score ${first.score.toFixed(3)}`;
+    if (scoreEl) scoreEl.textContent = scorePct;
+
+    // Wire card clicks to update inspector
+    feedEl.querySelectorAll('.hunter-alert-card').forEach(card => {
+      card.addEventListener('click', () => {
+        const idx = parseInt(card.dataset.liveIndex ?? 0);
+        const entry = liveAgents[idx];
+        if (!entry) return;
+        feedEl.querySelectorAll('.hunter-alert-card').forEach(c => c.classList.remove('active'));
+        card.classList.add('active');
+        const sp = Math.round(entry.score * 100);
+        if (typeEl) typeEl.textContent = entry.agent;
+        if (descEl) descEl.textContent = `Risk: ${entry.risk} — Dominant signal: ${entry.dominant_feature || 'none'}. Timestamp: ${liveState.aiRisks.timestamp || '—'}`;
+        if (targetEl) targetEl.textContent = entry.agent;
+        if (eventsEl) eventsEl.textContent = `${entry.features ? Object.values(entry.features).reduce((a, b) => a + b, 0) : '—'} events`;
+        if (rawEl) rawEl.textContent = JSON.stringify(entry, null, 2);
+        if (actionEl) actionEl.textContent = entry.risk === 'CRITICAL' || entry.risk === 'HIGH'
+          ? `Investigate ${entry.agent} immediately — anomaly score ${entry.score.toFixed(3)}, trigger: ${entry.dominant_feature}`
+          : `Monitor ${entry.agent} — risk ${entry.risk}, score ${entry.score.toFixed(3)}`;
+        if (scoreEl) scoreEl.textContent = sp;
+        if (hunterGaugeChart) {
+          hunterGaugeChart.data.datasets[0].data = [sp, 100 - sp];
+          hunterGaugeChart.update();
+        }
+      });
     });
-  });
+  } else {
+    // Fallback: static alert cards wired with old mock data
+    document.querySelectorAll('.hunter-alert-card').forEach(card => {
+      card.addEventListener('click', () => {
+        selectedAlertId = parseInt(card.dataset.alertId) || 1;
+        renderTab('hunter');
+        setTimeout(initHunterTab, 50);
+      });
+    });
+  }
 
   // Draw gauge
   drawHunterGauge();
