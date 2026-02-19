@@ -245,7 +245,8 @@ def run_engine() -> None:
                     "score":            round(score, 4),
                     "risk":             risk,
                     "dominant_feature": dom,
-                    "features":         af["features"],
+                    "top_source_ip":    af["features"].get("top_source_ip"),
+                    "features":         {k: v for k, v in af["features"].items() if k != "top_source_ip"},
                 })
 
             # ── 7. Global risk ────────────────────────────────────────────────

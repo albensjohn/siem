@@ -39,8 +39,7 @@ const agents = Array.from({ length: 35 }, (_, i) => ({
   id: i,
   status: i === 5 || i === 12 ? 'threat' : i % 8 === 0 ? 'inactive' : 'healthy',
   name: `SRV-${String(i).padStart(2, '0')}`,
-  cpu: Math.floor(20 + Math.random() * 60),
-  ram: Math.floor(30 + Math.random() * 50),
+  os: 'Linux',
 }));
 
 const vulnData = [
@@ -191,7 +190,7 @@ function updateFooterStatus() {
     <div class="footer-left">
       <div class="footer-item">${mgrDot}<span>MGR_API: ${mgrOnline ? 'ONLINE' : 'OFFLINE'}</span></div>
       <div class="footer-item">${idxDot}<span>INDEXER: ${idxOnline ? 'STREAMING' : 'OFFLINE'}</span></div>
-      <div class="footer-item">${aiDot}<span>AI_ENGINE: ${aiOnline ? 'v2.4.1_STABLE' : 'STARTING'}</span></div>
+      <div class="footer-item">${aiDot}<span>AI_ENGINE: ${(() => { const s = liveState.aiRisks.status; return s === 'OK' ? 'v2.4.1_STABLE' : s === 'LEARNING' ? 'LEARNING…' : s === 'DEGRADED' ? 'DEGRADED' : 'OFFLINE'; })()}</span></div>
     </div>
     <div class="footer-right">
       <span>AGENTS: ${liveState.agents.length || '—'}</span>
@@ -290,7 +289,7 @@ function renderSidebar() {
     <div class="sidebar-logo">S</div>
     <nav class="sidebar-nav" id="sidebar-nav"></nav>
     <div class="sidebar-bottom">
-      <button class="sidebar-logout" title="Logout">
+      <button class="sidebar-logout" title="Logout" onclick="handleLogout()">
         ${lucideIcon('log-out', 20)}
       </button>
     </div>
@@ -358,10 +357,16 @@ function renderTopBar() {
       </div>
       <canvas id="sparkline-canvas" width="96" height="40"></canvas>
       <div class="topbar-divider"></div>
-      <button class="topbar-bell">
-        ${lucideIcon('bell', 20)}
-        <span class="topbar-bell-dot"></span>
-      </button>
+      <div style="position:relative">
+        <button class="topbar-bell" id="bell-btn" onclick="toggleNotifications()">
+          ${lucideIcon('bell', 20)}
+          <span class="topbar-bell-dot" id="bell-dot"></span>
+        </button>
+        <div id="notif-panel" style="display:none;position:absolute;right:0;top:calc(100% + 8px);width:320px;background:#0a0a0f;border:1px solid rgba(0,240,255,0.2);border-radius:8px;z-index:999;box-shadow:0 8px 32px rgba(0,0,0,0.6)">
+          <div style="padding:12px 16px;border-bottom:1px solid rgba(255,255,255,0.07);font-size:11px;letter-spacing:1px;color:#A0A0A0">RECENT THREATS</div>
+          <div id="notif-list" style="max-height:320px;overflow-y:auto"></div>
+        </div>
+      </div>
       <div class="topbar-user">
         <div class="topbar-avatar">${lucideIcon('user', 16)}</div>
         <div>
@@ -441,13 +446,8 @@ function renderTab(tab) {
 // NEXUS TAB
 // ============================================================
 function buildNexusTab() {
-  const anomalyBars = Array.from({ length: 120 }, (_, i) => {
-    const isAnomaly = Math.random() > 0.95;
-    const isWarning = !isAnomaly && Math.random() > 0.9;
-    const cls = isAnomaly ? 'anomaly' : isWarning ? 'warning' : '';
-    const delay = (i * 0.02).toFixed(2);
-    return `<div class="anomaly-bar ${cls}" style="animation-delay:${delay}s"></div>`;
-  }).join('');
+  // Build real anomaly timeline: 120 one-minute buckets for the last 2 hours
+  const anomalyBars = buildAnomalyBars();
 
   const arcs = [1, 2, 3, 4, 5].map((_, i) => {
     const left = (15 + Math.random() * 70).toFixed(1);
@@ -457,7 +457,7 @@ function buildNexusTab() {
     return `<div class="map-arc" style="left:${left}%;top:${top}%;transform:rotate(${rot}deg);animation-delay:${delay}s"></div>`;
   }).join('');
 
-  const activityRows = recentLogs.map(log => `
+  const activityRows = recentLogs.map((log, idx) => `
     <div class="activity-row">
       <div class="activity-severity ${log.severity}"></div>
       <div style="flex:1">
@@ -467,7 +467,7 @@ function buildNexusTab() {
           <span>Time: ${log.time}</span>
         </div>
       </div>
-      <button class="activity-inspect">INSPECT</button>
+      <button class="activity-inspect" onclick="showAlertDetail(null,${idx})">INSPECT</button>
     </div>
   `).join('');
 
@@ -572,7 +572,7 @@ function buildNexusTab() {
       <div class="glass-card activity-card">
         <div class="activity-header">
           <h3>Recent Activity Stream</h3>
-          <button class="activity-export">EXPORT LOGS.CSV</button>
+          <button class="activity-export" id="export-btn" onclick="exportLogsCSV()">EXPORT LOGS.CSV</button>
         </div>
         ${activityRows}
       </div>
@@ -618,13 +618,13 @@ function initNexusTab() {
                 <span>Time: ${time}</span>
               </div>
             </div>
-            <button class="activity-inspect">INSPECT</button>
+            <button class="activity-inspect" onclick="showAlertDetail(arguments[0] || event, -1, this)">INSPECT</button>
           </div>`;
       }).join('');
       streamEl.innerHTML = `
         <div class="activity-header">
           <h3>Live Activity Stream</h3>
-          <button class="activity-export">EXPORT LOGS.CSV</button>
+          <button class="activity-export" id="export-btn" onclick="exportLogsCSV()">EXPORT LOGS.CSV</button>
         </div>
         ${rows}`;
     }
@@ -723,7 +723,6 @@ function buildHunterTab() {
                   <div class="hunter-action-title">Recommended Action</div>
                   <div class="hunter-action-desc" id="inspector-action">Auto-isolate host and revoke temporary credentials for source IP ${alert.details.sourceIp}</div>
                 </div>
-                <button class="hunter-isolate-btn">EXECUTE ISOLATION</button>
               </div>
             </div>
           </div>
@@ -764,6 +763,7 @@ function initHunterTab() {
     const typeEl = document.getElementById('inspector-type');
     const descEl = document.getElementById('inspector-desc');
     const targetEl = document.getElementById('inspector-target');
+    const ipEl = document.getElementById('inspector-ip');
     const eventsEl = document.getElementById('inspector-events');
     const rawEl = document.getElementById('inspector-raw');
     const actionEl = document.getElementById('inspector-action');
@@ -771,6 +771,7 @@ function initHunterTab() {
     if (typeEl) typeEl.textContent = first.agent;
     if (descEl) descEl.textContent = `Risk: ${first.risk} — Dominant signal: ${first.dominant_feature || 'none'}. Timestamp: ${liveState.aiRisks.timestamp || '—'}`;
     if (targetEl) targetEl.textContent = first.agent;
+    if (ipEl) ipEl.textContent = first.top_source_ip || 'N/A';
     if (eventsEl) eventsEl.textContent = `${first.features ? Object.values(first.features).reduce((a, b) => a + b, 0) : '—'} events`;
     if (rawEl) rawEl.textContent = JSON.stringify(first, null, 2);
     if (actionEl) actionEl.textContent = first.risk === 'CRITICAL' || first.risk === 'HIGH'
@@ -790,6 +791,7 @@ function initHunterTab() {
         if (typeEl) typeEl.textContent = entry.agent;
         if (descEl) descEl.textContent = `Risk: ${entry.risk} — Dominant signal: ${entry.dominant_feature || 'none'}. Timestamp: ${liveState.aiRisks.timestamp || '—'}`;
         if (targetEl) targetEl.textContent = entry.agent;
+        if (ipEl) ipEl.textContent = entry.top_source_ip || 'N/A';
         if (eventsEl) eventsEl.textContent = `${entry.features ? Object.values(entry.features).reduce((a, b) => a + b, 0) : '—'} events`;
         if (rawEl) rawEl.textContent = JSON.stringify(entry, null, 2);
         if (actionEl) actionEl.textContent = entry.risk === 'CRITICAL' || entry.risk === 'HIGH'
@@ -850,15 +852,14 @@ function drawHunterGauge() {
 function buildFleetTab() {
   // Merge live agents into the agents array if available
   if (liveState.agents.length > 0) {
-    // Replace mock agents with live data
     agents.length = 0;
     liveState.agents.forEach((a, i) => {
       agents.push({
         id: i,
         status: a.status === 'active' ? 'healthy' : a.status === 'disconnected' ? 'inactive' : 'inactive',
         name: a.name || `SRV-${String(i).padStart(2, '0')}`,
-        cpu: Math.floor(20 + Math.random() * 60),
-        ram: Math.floor(30 + Math.random() * 50),
+        os: a.os?.name || a.os?.platform || '—',
+        version: a.os?.version || '',
       });
     });
   }
@@ -878,27 +879,20 @@ function buildFleetTab() {
             <span class="hex-tooltip-dot ${agent.status}"></span>
           </div>
           <div class="hex-tooltip-row">
-            <span class="hex-tooltip-key">CPU Load</span>
-            <span class="hex-tooltip-val">${agent.cpu}%</span>
+            <span class="hex-tooltip-key">Status</span>
+            <span class="hex-tooltip-val">${agent.status}</span>
           </div>
           <div class="hex-tooltip-row">
-            <span class="hex-tooltip-key">Memory</span>
-            <span class="hex-tooltip-val">${agent.ram}%</span>
+            <span class="hex-tooltip-key">OS</span>
+            <span class="hex-tooltip-val">${agent.os || '—'}</span>
           </div>
         </div>
       </div>
     `;
   }).join('');
 
-  const maintItems = [1, 2, 3].map(i => `
-    <div class="fleet-maint-item">
-      <div class="fleet-maint-icon">${lucideIcon('cpu', 14)}</div>
-      <div>
-        <div class="fleet-maint-name">Kernel Patch Required</div>
-        <div class="fleet-maint-sub">SRV-0${i} • v5.15.0-76</div>
-      </div>
-    </div>
-  `).join('');
+  // Maintenance queue: real disconnected/threat agents, fall back to empty message
+  const maintItems = buildMaintenanceQueue();
 
   return `
     <div class="fleet-grid">
@@ -927,26 +921,9 @@ function buildFleetTab() {
       </div>
 
       <div class="fleet-sidebar">
-        <div class="glass-card fleet-dist-card">
+        <div class="glass-card fleet-dist-card" id="fleet-dist-card">
           <div class="fleet-dist-title">Fleet Distribution</div>
-          <div class="fleet-dist-item">
-            <div class="fleet-dist-row">
-              <span class="fleet-dist-name">Linux Nodes</span>
-              <span class="fleet-dist-count cyan">24</span>
-            </div>
-            <div class="fleet-dist-track">
-              <div class="fleet-dist-bar cyan" style="width:70%"></div>
-            </div>
-          </div>
-          <div class="fleet-dist-item">
-            <div class="fleet-dist-row">
-              <span class="fleet-dist-name">Windows Nodes</span>
-              <span class="fleet-dist-count purple">18</span>
-            </div>
-            <div class="fleet-dist-track">
-              <div class="fleet-dist-bar purple" style="width:45%"></div>
-            </div>
-          </div>
+          <div id="fleet-dist-content"><div class="fleet-dist-item"><div class="fleet-dist-row"><span class="fleet-dist-name">Loading...</span></div></div></div>
         </div>
 
         <div class="glass-card fleet-maint-card">
@@ -956,6 +933,271 @@ function buildFleetTab() {
       </div>
     </div>
   `;
+  // After DOM is painted, fill in the real fleet distribution
+  setTimeout(() => buildFleetDistribution(), 0);
+}
+
+// ── Anomaly Horizon Timeline (real per-minute buckets) ────────────────────────
+function buildAnomalyBars() {
+  const SLOTS = 120;
+  const buckets = new Array(SLOTS).fill(0);
+  const levelMap = new Array(SLOTS).fill(0);
+
+  if (liveState.alerts.length > 0) {
+    const now = Date.now();
+    liveState.alerts.forEach(hit => {
+      const ts = hit._source?.['@timestamp'];
+      if (!ts) return;
+      const age = (now - new Date(ts).getTime()) / 60000;
+      const slot = SLOTS - 1 - Math.floor(age);
+      if (slot >= 0 && slot < SLOTS) {
+        buckets[slot]++;
+        const lvl = hit._source?.rule?.level ?? 0;
+        levelMap[slot] = Math.max(levelMap[slot], lvl);
+      }
+    });
+  }
+
+  const maxVal = Math.max(...buckets, 1);
+  return buckets.map((count, i) => {
+    const lvl = levelMap[i];
+    const cls = lvl >= 10 ? 'anomaly' : lvl >= 7 ? 'warning' : '';
+    const pct = count > 0 ? Math.max(15, Math.round((count / maxVal) * 100)) : null;
+    const delay = (i * 0.02).toFixed(2);
+    const style = pct
+      ? `animation-delay:${delay}s;height:${pct}%;align-self:flex-end`
+      : `animation-delay:${delay}s`;
+    return `<div class="anomaly-bar ${cls}" style="${style}" title="${count} alert${count !== 1 ? 's' : ''} at T-${SLOTS - 1 - i}min"></div>`;
+  }).join('');
+}
+
+// ── Maintenance Queue (real: disconnected agents) ─────────────────────────────
+function buildMaintenanceQueue() {
+  const src = liveState.agents;
+  const problem = src.filter(a => a.status === 'disconnected' || a.status === 'never_connected');
+
+  if (src.length === 0) {
+    return `<div class="fleet-maint-item"><div><div class="fleet-maint-name" style="color:#A0A0A0">No live agent data</div></div></div>`;
+  }
+  if (problem.length === 0) {
+    return `<div class="fleet-maint-item"><div><div class="fleet-maint-name" style="color:#10B981">All agents online</div><div class="fleet-maint-sub">Queue empty</div></div></div>`;
+  }
+  return problem.slice(0, 6).map(a => {
+    const lastSeen = a.lastKeepAlive ? new Date(a.lastKeepAlive).toLocaleString() : 'Unknown';
+    return `
+      <div class="fleet-maint-item">
+        <div class="fleet-maint-icon" style="color:#FF2E63">${lucideIcon('alert-triangle', 14)}</div>
+        <div>
+          <div class="fleet-maint-name">${a.name}</div>
+          <div class="fleet-maint-sub">Offline &bull; Last seen: ${lastSeen}</div>
+        </div>
+      </div>`;
+  }).join('');
+}
+
+// ── Logout ────────────────────────────────────────────────────────────────────
+function handleLogout() {
+  if (!confirm('Log out of SENTINEL SIEM?')) return;
+  document.body.innerHTML = `
+    <div style="display:flex;flex-direction:column;align-items:center;justify-content:center;height:100vh;background:#06060a;color:#fff;font-family:'Courier New',monospace;gap:16px">
+      <div style="font-size:32px;color:#00F0FF;font-weight:700;letter-spacing:4px">SENTINEL</div>
+      <div style="color:#A0A0A0;font-size:13px">Session terminated.</div>
+      <button onclick="location.reload()" style="margin-top:16px;padding:10px 28px;background:rgba(0,240,255,0.1);border:1px solid rgba(0,240,255,0.4);border-radius:6px;color:#00F0FF;cursor:pointer;font-size:12px;letter-spacing:2px">RECONNECT</button>
+    </div>`;
+}
+
+// ── Bell Notifications ────────────────────────────────────────────────────────
+function toggleNotifications() {
+  const panel = document.getElementById('notif-panel');
+  if (!panel) return;
+  const isOpen = panel.style.display !== 'none';
+  panel.style.display = isOpen ? 'none' : 'block';
+  if (!isOpen) {
+    populateNotifications();
+    setTimeout(() => {
+      document.addEventListener('click', function close(e) {
+        if (!panel.contains(e.target) && !document.getElementById('bell-btn')?.contains(e.target)) {
+          panel.style.display = 'none';
+        }
+        document.removeEventListener('click', close);
+      });
+    }, 100);
+  }
+}
+
+function populateNotifications() {
+  const list = document.getElementById('notif-list');
+  if (!list) return;
+  const high = liveState.alerts.filter(h => (h._source?.rule?.level ?? 0) >= 7).slice(0, 8);
+  if (high.length === 0) {
+    list.innerHTML = `<div style="padding:16px;color:#A0A0A0;font-size:12px">No high-severity alerts at this time.</div>`;
+    return;
+  }
+  list.innerHTML = high.map(h => {
+    const s = h._source || {};
+    const lvl = s.rule?.level ?? 0;
+    const desc = s.rule?.description || 'Unknown';
+    const ag = s.agent?.name || 'Manager';
+    const ts = s['@timestamp'] ? new Date(s['@timestamp']).toLocaleTimeString() : '—';
+    const col = lvl >= 13 ? '#FF2E63' : lvl >= 10 ? '#f97316' : '#EAB308';
+    return `<div style="padding:10px 16px;border-bottom:1px solid rgba(255,255,255,0.05);display:flex;gap:10px;align-items:flex-start">
+      <div style="width:6px;height:6px;border-radius:50%;background:${col};margin-top:5px;flex-shrink:0"></div>
+      <div>
+        <div style="font-size:12px;color:#e0e0e0;margin-bottom:2px">${desc.substring(0, 60)}${desc.length > 60 ? '&hellip;' : ''}</div>
+        <div style="font-size:11px;color:#A0A0A0">${ag} &bull; ${ts} &bull; Level ${lvl}</div>
+      </div></div>`;
+  }).join('');
+  const dot = document.getElementById('bell-dot');
+  if (dot) dot.style.display = high.length > 0 ? '' : 'none';
+}
+
+// ── Alert Inspect Bar ─────────────────────────────────────────────────────────
+function showAlertDetail(e, mockIdx, btn) {
+  const existing = document.getElementById('alert-detail-bar');
+  if (existing) { existing.remove(); return; }
+
+  let data = {};
+  if (mockIdx >= 0 && recentLogs[mockIdx]) {
+    const log = recentLogs[mockIdx];
+    data = {
+      msg: log.msg, agent: log.source, time: log.time,
+      level: log.severity === 'critical' ? 13 : log.severity === 'warning' ? 7 : 3,
+      ruleId: '—', srcip: '—'
+    };
+  } else if (btn) {
+    const allBtns = [...document.querySelectorAll('.activity-inspect')];
+    const idx = allBtns.indexOf(btn);
+    const hit = liveState.alerts[idx] || liveState.alerts[0];
+    if (hit) {
+      const s = hit._source || {};
+      data = {
+        msg: s.rule?.description || '—', agent: s.agent?.name || '—',
+        time: s['@timestamp'] ? new Date(s['@timestamp']).toLocaleString() : '—',
+        level: s.rule?.level ?? '—', ruleId: s.rule?.id || '—',
+        srcip: s.data?.srcip || s.data?.src_ip || '—'
+      };
+    }
+  }
+  if (!data.msg) return;
+
+  const bar = document.createElement('div');
+  bar.id = 'alert-detail-bar';
+  bar.style.cssText = 'position:fixed;bottom:0;left:0;right:0;background:#09090f;border-top:1px solid rgba(0,240,255,0.25);padding:14px 24px;z-index:9000;display:flex;gap:32px;align-items:center;font-size:12px;font-family:inherit;backdrop-filter:blur(12px)';
+  bar.innerHTML = `
+    <div style="flex:1;min-width:0">
+      <div style="color:#00F0FF;font-size:10px;letter-spacing:2px;margin-bottom:4px">ALERT DETAIL</div>
+      <div style="color:#e0e0e0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${data.msg}</div>
+    </div>
+    <div style="display:flex;gap:24px;flex-shrink:0">
+      <div><div style="color:#606060;font-size:10px;margin-bottom:2px">AGENT</div><div style="color:#fff">${data.agent}</div></div>
+      <div><div style="color:#606060;font-size:10px;margin-bottom:2px">RULE</div><div style="color:#fff">${data.ruleId}</div></div>
+      <div><div style="color:#606060;font-size:10px;margin-bottom:2px">LEVEL</div><div style="color:#EAB308">${data.level}</div></div>
+      <div><div style="color:#606060;font-size:10px;margin-bottom:2px">SRC IP</div><div style="color:#fff">${data.srcip}</div></div>
+      <div><div style="color:#606060;font-size:10px;margin-bottom:2px">TIME</div><div style="color:#fff">${data.time}</div></div>
+    </div>
+    <button onclick="document.getElementById('alert-detail-bar').remove()" style="background:none;border:none;color:#606060;cursor:pointer;font-size:20px;padding:4px 8px;line-height:1">&times;</button>`;
+  document.body.appendChild(bar);
+}
+
+// ── Fleet Distribution (real from Wazuh agent OS data) ────────────────────────
+function buildFleetDistribution() {
+  const el = document.getElementById('fleet-dist-content');
+  if (!el) return;
+
+  const source = liveState.agents.length > 0 ? liveState.agents : agents;
+  const counts = {};
+  source.forEach(a => {
+    const name = (liveState.agents.length > 0)
+      ? (a.os?.name || a.os?.platform || 'Unknown')
+      : (a.os || 'Unknown');
+    const key = name.includes('Windows') ? 'Windows' :
+      name.includes('Linux') ? 'Linux' :
+        name.includes('Darwin') ? 'macOS' : name;
+    counts[key] = (counts[key] || 0) + 1;
+  });
+
+  const total = Object.values(counts).reduce((s, v) => s + v, 0) || 1;
+  const palette = ['cyan', 'purple', 'green', 'orange'];
+  let html = Object.entries(counts)
+    .sort((a, b) => b[1] - a[1])
+    .map(([os, n], i) => {
+      const pct = Math.round((n / total) * 100);
+      const col = palette[i % palette.length];
+      return `
+        <div class="fleet-dist-item">
+          <div class="fleet-dist-row">
+            <span class="fleet-dist-name">${os} Nodes</span>
+            <span class="fleet-dist-count ${col}">${n}</span>
+          </div>
+          <div class="fleet-dist-track">
+            <div class="fleet-dist-bar ${col}" style="width:${pct}%"></div>
+          </div>
+        </div>`;
+    }).join('');
+
+  if (!html) html = '<div class="fleet-dist-item"><div class="fleet-dist-row"><span class="fleet-dist-name">No agents detected</span></div></div>';
+  el.innerHTML = html;
+}
+
+// ── MITRE Alert Banner (dynamic) ──────────────────────────────────────────────
+function buildMitreAlertBanner() {
+  const live = activeTechniques.filter(t =>
+    liveState.mitreTechniques.includes(t)
+  );
+  const hasThreat = live.length > 0;
+
+  const desc = hasThreat
+    ? `Sentinel detected <strong>${live.length}</strong> active technique(s) correlated from live Wazuh events: ${live.slice(0, 5).map(t => `<span class="highlight">${t}</span>`).join(', ')}.`
+    : `No confirmed active tactic chains from live events. Static baseline techniques (<span class="highlight">Brute Force</span>, <span class="highlight">Valid Accounts</span>) remain in watchlist.`;
+
+  const title = hasThreat ? 'Active Tactic Chain Detected' : 'No Live Tactic Chain';
+  const icon = hasThreat ? 'shield-alert' : 'shield';
+
+  return `
+    <div class="glass-card matrix-alert-card">
+      <div class="matrix-alert-inner">
+        <div class="matrix-alert-icon">${lucideIcon(icon, 24)}</div>
+        <div>
+          <div class="matrix-alert-title">${title}</div>
+          <p class="matrix-alert-desc">${desc}</p>
+          <div class="matrix-alert-actions">
+            <button class="matrix-btn-secondary">VIEW FULL ATTACK PATH</button>
+          </div>
+        </div>
+      </div>
+    </div>`;
+}
+
+// ── Export CSV (real data) ────────────────────────────────────────────────────
+function exportLogsCSV() {
+  const rows = [['Timestamp', 'Agent', 'Rule ID', 'Level', 'Severity', 'Description']];
+
+  const alerts = liveState.alerts;
+  if (alerts.length > 0) {
+    alerts.forEach(hit => {
+      const src = hit._source || {};
+      const ts = src['@timestamp'] || '';
+      const agent = src.agent?.name || 'Manager';
+      const ruleId = src.rule?.id || '';
+      const level = src.rule?.level ?? '';
+      const sev = level >= 13 ? 'Critical' : level >= 10 ? 'High' : level >= 7 ? 'Medium' : 'Low';
+      const desc = (src.rule?.description || '').replace(/"/g, '""');
+      rows.push([ts, agent, ruleId, level, sev, `"${desc}"`]);
+    });
+  } else {
+    rows.push(['No live data — connect to Wazuh for real logs.', '', '', '', '', '']);
+  }
+
+  const csv = rows.map(r => r.join(',')).join('\n');
+  const blob = new Blob([csv], { type: 'text/csv' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `sentinel-logs-${new Date().toISOString().slice(0, 10)}.csv`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
 }
 
 // ============================================================
@@ -999,20 +1241,20 @@ function buildShieldTab() {
         <!-- Right column -->
         <div class="shield-right-col">
           <div class="glass-card shield-compliance-card">
-            <div class="shield-compliance-title">Compliance Score</div>
-            <div class="shield-compliance-score">84%</div>
-            <div class="shield-compliance-label">Overall Hardening</div>
+            <div class="shield-compliance-title">Posture Indicators</div>
+            <div class="shield-compliance-score" id="posture-score">—</div>
+            <div class="shield-compliance-label">Alert-Based Risk Score</div>
             <div class="shield-compliance-row">
-              <span class="shield-compliance-key">SOC2 Type II</span>
-              <span class="shield-compliance-val pass">PASS</span>
+              <span class="shield-compliance-key">Critical Alerts</span>
+              <span class="shield-compliance-val" id="posture-critical" style="color:#FF2E63">—</span>
             </div>
             <div class="shield-compliance-row">
-              <span class="shield-compliance-key">HIPAA</span>
-              <span class="shield-compliance-val warn">WARNING</span>
+              <span class="shield-compliance-key">High Alerts</span>
+              <span class="shield-compliance-val" id="posture-high" style="color:#f97316">—</span>
             </div>
             <div class="shield-compliance-row">
-              <span class="shield-compliance-key">NIST SP 800-53</span>
-              <span class="shield-compliance-val enforced">ENFORCED</span>
+              <span class="shield-compliance-key">AI Risk Level</span>
+              <span class="shield-compliance-val" id="posture-ai">—</span>
             </div>
           </div>
           <div class="glass-card shield-reco-card">
@@ -1091,6 +1333,19 @@ function initShieldTab() {
       }).join('');
       tbody.innerHTML = liveRows;
     }
+
+    // --- LIVE: populate Posture Indicators card ---
+    const critEl = document.getElementById('posture-critical');
+    const highEl = document.getElementById('posture-high');
+    const scoreEl = document.getElementById('posture-score');
+    const aiEl = document.getElementById('posture-ai');
+    if (critEl) critEl.textContent = counts.Critical;
+    if (highEl) highEl.textContent = counts.High;
+    const totalAlerts = liveState.alerts.length || 1;
+    const riskPct = Math.min(100, Math.round(((counts.Critical * 3 + counts.High * 2) / totalAlerts) * 50));
+    if (scoreEl) scoreEl.textContent = riskPct + '%';
+    const aiRisk = liveState.aiRisks?.global_risk;
+    if (aiEl) aiEl.textContent = aiRisk != null ? liveState.aiRisks.agents?.[0]?.risk || '—' : '—';
   }
 
   const canvas = document.getElementById('shield-chart');
@@ -1185,24 +1440,7 @@ function buildMatrixTab() {
         <div class="matrix-grid">${cols}</div>
       </div>
 
-      <div class="glass-card matrix-alert-card">
-        <div class="matrix-alert-inner">
-          <div class="matrix-alert-icon">${lucideIcon('shield-alert', 24)}</div>
-          <div>
-            <div class="matrix-alert-title">Active Tactic Chain Detected</div>
-            <p class="matrix-alert-desc">
-              Sentinel has correlated activity matching a known Ransomware-as-a-Service (RaaS) playbook.
-              The chain involves <span class="highlight">Valid Accounts (T1078)</span> followed by
-              <span class="highlight"> Brute Force (T1110)</span> and
-              <span class="highlight"> Data Encrypted for Impact (T1486)</span>.
-            </p>
-            <div class="matrix-alert-actions">
-              <button class="matrix-btn-primary">INITIATE INCIDENT RESPONSE</button>
-              <button class="matrix-btn-secondary">VIEW FULL ATTACK PATH</button>
-            </div>
-          </div>
-        </div>
-      </div>
+      ${buildMitreAlertBanner()}
     </div>
   `;
 }

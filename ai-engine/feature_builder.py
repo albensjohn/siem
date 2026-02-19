@@ -128,6 +128,7 @@ def _extract_features_for_agent(events: list[dict]) -> dict:
     """
     failed_logins = 0
     source_ips: set[str] = set()
+    ip_counts:  dict[str, int] = {}
     sudo_events = 0
     file_mods   = 0
     processes   = 0
@@ -141,6 +142,7 @@ def _extract_features_for_agent(events: list[dict]) -> dict:
             failed_logins += 1
         if sip:
             source_ips.add(sip)
+            ip_counts[sip] = ip_counts.get(sip, 0) + 1
         if rid in SUDO_RULES:
             sudo_events += 1
         if rgroups & SYSCHECK_GROUPS:
@@ -148,12 +150,15 @@ def _extract_features_for_agent(events: list[dict]) -> dict:
         if rgroups & PROCESS_GROUPS:
             processes += 1
 
+    top_ip = max(ip_counts, key=ip_counts.get) if ip_counts else None
+
     return {
-        "failed_logins": failed_logins,
-        "unique_ips":    len(source_ips),
-        "sudo":          sudo_events,
-        "file_mods":     file_mods,
-        "process":       processes,
+        "failed_logins":  failed_logins,
+        "unique_ips":     len(source_ips),
+        "sudo":           sudo_events,
+        "file_mods":      file_mods,
+        "process":        processes,
+        "top_source_ip":  top_ip,
     }
 
 
