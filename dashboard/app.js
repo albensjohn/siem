@@ -95,6 +95,8 @@ const API = {
   MGR_PASS: 'MyS3cr37P450r.*-',
   IDX_USER: 'admin',
   IDX_PASS: 'SecretPassword',
+  // Key is injected server-side by nginx envsubst — never exposed to browser
+  GEMINI_URL: '/gemini-api/v1beta/models/gemini-2.0-flash:generateContent',
 };
 
 let liveState = {
@@ -134,7 +136,7 @@ async function apiFetchAgents() {
 async function apiFetchAlerts() {
   try {
     const query = {
-      size: 10,
+      size: 200,
       sort: [{ '@timestamp': 'desc' }],
       query: { range: { 'rule.level': { gte: 3 } } },
       aggs: {
@@ -262,6 +264,11 @@ async function initApp() {
   renderFooter();
   setActiveTab('nexus');
 
+  // Wire search bar to Gemini LLM suggestions
+  setTimeout(() => initSearchBar(), 200);
+  // Launch floating AI chat panel
+  setTimeout(() => initChatPanel(), 300);
+
   // Kick off live data (auth first, then fetch)
   await apiAuth();
   await refreshLiveData();
@@ -269,6 +276,7 @@ async function initApp() {
   // Poll every 10 seconds
   setInterval(refreshLiveData, 10000);
 }
+
 
 // ============================================================
 // SIDEBAR
@@ -506,11 +514,13 @@ function buildNexusTab() {
             <div class="map-pulse-point purple" style="top:60%;left:40%">
               <div class="dot" style="width:6px;height:6px"></div>
             </div>
-            <div class="map-overlay-bl">
-              <p>LAT: 37.7749 // LON: -122.4194</p>
-              <p>REGION: US-WEST-2 (ACTIVE)</p>
+            <div class="map-overlay-bl" id="map-stats-overlay">
+              <p>AGENTS: <span style="color:#00F0FF">${liveState.agents.length || '—'}</span></p>
+              <p>ALERTS (24H): <span style="color:#FF2E63">${liveState.alerts.length || '—'}</span></p>
             </div>
-            <div class="map-overlay-tr">[!] HIGH_VOLUME_INGRESS_DETECTED</div>
+            <div class="map-overlay-tr" id="map-threat-overlay" style="color:${liveState.alerts.some(h => (h._source?.rule?.level ?? 0) >= 13) ? '#FF2E63' : '#00F0FF'}">
+              ${liveState.alerts.some(h => (h._source?.rule?.level ?? 0) >= 13) ? '[!] CRITICAL THREATS ACTIVE' : '[ ] ALL SYSTEMS NOMINAL'}
+            </div>
           </div>
         </div>
 
@@ -854,12 +864,21 @@ function buildFleetTab() {
   if (liveState.agents.length > 0) {
     agents.length = 0;
     liveState.agents.forEach((a, i) => {
+      // Wazuh returns status as 'active'/'Active'/'disconnected' etc.
+      const st = (a.status || '').toLowerCase();
+      const status = st === 'active' ? 'healthy'
+        : st === 'disconnected' || st === 'never_connected' ? 'inactive'
+          : 'inactive';
       agents.push({
         id: i,
-        status: a.status === 'active' ? 'healthy' : a.status === 'disconnected' ? 'inactive' : 'inactive',
+        status,
         name: a.name || `SRV-${String(i).padStart(2, '0')}`,
         os: a.os?.name || a.os?.platform || '—',
         version: a.os?.version || '',
+        ip: a.ip || '—',
+        lastSeen: a.lastKeepAlive || a.dateAdd || '—',
+        wazuhId: a.id || '—',
+        rawAgent: a,
       });
     });
   }
@@ -869,9 +888,9 @@ function buildFleetTab() {
     const offset = row % 2 !== 0 ? 'margin-top:46px;margin-left:-4px;' : '';
     return `
       <div class="hex-wrap" style="${offset}">
-        <div class="hex ${agent.status}" title="${agent.name}">
+        <div class="hex ${agent.status}" title="${agent.name}" onclick="showAgentModal(${i})" style="cursor:pointer">
           ${lucideIcon('activity', 12)}
-          <span class="hex-num">${agent.name.split('-')[1]}</span>
+          <span class="hex-num">${agent.name.includes('-') ? agent.name.split('-').slice(1).join('-') : agent.name}</span>
         </div>
         <div class="hex-tooltip">
           <div class="hex-tooltip-header">
@@ -934,7 +953,7 @@ function buildFleetTab() {
     </div>
   `;
   // After DOM is painted, fill in the real fleet distribution
-  setTimeout(() => buildFleetDistribution(), 0);
+  setTimeout(() => buildFleetDistribution(), 50);
 }
 
 // ── Anomaly Horizon Timeline (real per-minute buckets) ────────────────────────
@@ -1097,6 +1116,529 @@ function showAlertDetail(e, mockIdx, btn) {
     </div>
     <button onclick="document.getElementById('alert-detail-bar').remove()" style="background:none;border:none;color:#606060;cursor:pointer;font-size:20px;padding:4px 8px;line-height:1">&times;</button>`;
   document.body.appendChild(bar);
+}
+
+// ── Agent Info Modal (Fleet hex click) ────────────────────────────────────────
+function showAgentModal(agentIdx) {
+  const existing = document.getElementById('agent-modal-overlay');
+  if (existing) existing.remove();
+
+  const a = agents[agentIdx];
+  if (!a) return;
+
+  // Alert count for this agent
+  const alertCount = liveState.alerts.filter(h =>
+    (h._source?.agent?.name || '') === a.name
+  ).length;
+
+  // AI risk from engine
+  const aiEntry = (liveState.aiRisks.agents || []).find(e => e.agent === a.name);
+  const riskColor = aiEntry?.risk === 'CRITICAL' ? '#FF2E63'
+    : aiEntry?.risk === 'HIGH' ? '#f97316'
+      : aiEntry?.risk === 'MEDIUM' ? '#EAB308' : '#10B981';
+
+  const lastSeen = a.lastSeen && a.lastSeen !== '—'
+    ? new Date(a.lastSeen).toLocaleString() : a.lastSeen;
+
+  const overlay = document.createElement('div');
+  overlay.id = 'agent-modal-overlay';
+  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.55);z-index:8000;display:flex;align-items:center;justify-content:flex-end;backdrop-filter:blur(2px)';
+  overlay.onclick = e => { if (e.target === overlay) overlay.remove(); };
+
+  overlay.innerHTML = `
+    <div style="width:340px;height:100%;background:#0a0a0f;border-left:1px solid rgba(0,240,255,0.2);padding:28px 24px;display:flex;flex-direction:column;gap:20px;overflow-y:auto;font-family:inherit">
+      <div style="display:flex;justify-content:space-between;align-items:center">
+        <div style="font-size:11px;letter-spacing:2px;color:#00F0FF">AGENT PROFILE</div>
+        <button onclick="document.getElementById('agent-modal-overlay').remove()" style="background:none;border:none;color:#606060;cursor:pointer;font-size:20px;line-height:1">&times;</button>
+      </div>
+
+      <div style="display:flex;align-items:center;gap:14px">
+        <div style="width:44px;height:44px;border-radius:50%;background:rgba(0,240,255,0.1);border:1px solid rgba(0,240,255,0.3);display:flex;align-items:center;justify-content:center;color:#00F0FF">${lucideIcon('server', 20)}</div>
+        <div>
+          <div style="font-size:16px;font-weight:600;color:#fff">${a.name}</div>
+          <div style="font-size:11px;color:${a.status === 'healthy' ? '#10B981' : '#FF2E63'};letter-spacing:1px">${a.status.toUpperCase()}</div>
+        </div>
+      </div>
+
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+        ${[
+      ['Wazuh ID', a.wazuhId || '—'],
+      ['IP Address', a.ip || '—'],
+      ['OS', a.os || '—'],
+      ['Version', a.version || '—'],
+      ['Alerts (live)', alertCount],
+      ['Last Seen', lastSeen],
+    ].map(([k, v]) => `
+          <div style="background:rgba(255,255,255,0.03);border-radius:6px;padding:10px 12px">
+            <div style="font-size:10px;color:#606060;margin-bottom:4px">${k}</div>
+            <div style="font-size:12px;color:#e0e0e0;word-break:break-all">${v}</div>
+          </div>`).join('')}
+      </div>
+
+      ${aiEntry ? `
+        <div style="background:rgba(255,46,99,0.06);border:1px solid rgba(255,46,99,0.2);border-radius:8px;padding:14px">
+          <div style="font-size:10px;color:#606060;margin-bottom:8px">AI RISK ASSESSMENT</div>
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+            <span style="color:${riskColor};font-weight:600;font-size:14px">${aiEntry.risk}</span>
+            <span style="color:#A0A0A0;font-size:11px">Score: ${Math.round(aiEntry.score * 100)}</span>
+          </div>
+          <div style="font-size:11px;color:#A0A0A0">Trigger: <span style="color:#e0e0e0">${aiEntry.dominant_feature || '—'}</span></div>
+          ${aiEntry.top_source_ip ? `<div style="font-size:11px;color:#A0A0A0;margin-top:4px">Top Src IP: <span style="color:#00F0FF">${aiEntry.top_source_ip}</span></div>` : ''}
+        </div>` : '<div style="font-size:11px;color:#606060;text-align:center;padding:12px">No AI risk data for this agent</div>'
+    }
+
+      <div>
+        <div style="font-size:10px;color:#606060;margin-bottom:8px">RECENT ALERTS</div>
+        ${liveState.alerts.filter(h => (h._source?.agent?.name || '') === a.name).slice(0, 4).map(h => {
+      const s = h._source || {};
+      const lvl = s.rule?.level ?? 0;
+      const col = lvl >= 13 ? '#FF2E63' : lvl >= 10 ? '#f97316' : lvl >= 7 ? '#EAB308' : '#10B981';
+      return `<div style="padding:8px 0;border-bottom:1px solid rgba(255,255,255,0.05);font-size:11px">
+            <div style="color:#e0e0e0">${(s.rule?.description || 'Unknown').substring(0, 48)}…</div>
+            <div style="color:${col};margin-top:2px">Level ${lvl}</div>
+          </div>`;
+    }).join('') || '<div style="font-size:11px;color:#606060">No recent alerts for this agent</div>'}
+      </div>
+    </div>`;
+
+  document.body.appendChild(overlay);
+}
+
+// ── Global Search + Gemini LLM Suggestions ───────────────────────────────────
+function initSearchBar() {
+  const input = document.querySelector('.topbar-search');
+  if (!input) return;
+
+  let debounceTimer = null;
+  const panel = createLLMPanel();
+
+  input.addEventListener('keydown', e => {
+    if (e.key === 'Escape') { closeLLMPanel(); input.value = ''; }
+    if (e.key === 'Enter' && input.value.trim()) {
+      e.preventDefault();
+      clearTimeout(debounceTimer);
+      triggerLLMSearch(input.value.trim(), panel);
+    }
+  });
+
+  input.addEventListener('input', () => {
+    clearTimeout(debounceTimer);
+    const q = input.value.trim();
+    if (q.length < 2) { closeLLMPanel(); return; }
+    debounceTimer = setTimeout(() => triggerLLMSearch(q, panel), 600);
+  });
+
+  document.addEventListener('keydown', e => {
+    if (e.key === 'Escape') { closeLLMPanel(); input.value = ''; }
+  });
+}
+
+function createLLMPanel() {
+  const wrap = document.querySelector('.topbar-search-wrap');
+  if (!wrap) return null;
+  if (document.getElementById('llm-panel')) return document.getElementById('llm-panel');
+  wrap.style.position = 'relative';
+  const panel = document.createElement('div');
+  panel.id = 'llm-panel';
+  panel.style.cssText = 'display:none;position:absolute;top:calc(100% + 8px);left:0;right:0;background:#0b0b10;border:1px solid rgba(0,240,255,0.2);border-radius:10px;z-index:9999;box-shadow:0 12px 40px rgba(0,0,0,0.7);overflow:hidden;min-width:440px';
+  wrap.appendChild(panel);
+  return panel;
+}
+
+function closeLLMPanel() {
+  const p = document.getElementById('llm-panel');
+  if (p) p.style.display = 'none';
+}
+
+async function triggerLLMSearch(query, panel) {
+  if (!panel) return;
+  panel.style.display = 'block';
+  panel.innerHTML = `
+    <div style="padding:12px 16px;border-bottom:1px solid rgba(255,255,255,0.07);display:flex;align-items:center;justify-content:space-between">
+      <span style="font-size:11px;letter-spacing:1.5px;color:#00F0FF">✦ SENTINEL LLM SUGGESTIONS</span>
+      <span style="font-size:10px;color:#606060;cursor:pointer" onclick="closeLLMPanel()">ESC TO CLOSE</span>
+    </div>
+    <div style="padding:20px;text-align:center;color:#A0A0A0;font-size:12px">Analyzing context…</div>
+    <div style="padding:10px 16px;border-top:1px solid rgba(255,255,255,0.07)">
+      <span style="font-size:10px;color:#606060">PROMPT: /help for command list</span>
+      <span style="float:right;font-size:10px;color:#7B61FF;background:rgba(123,97,255,0.1);padding:2px 8px;border-radius:4px">NEURAL-LINK ACTIVE</span>
+    </div>`;
+
+  const suggestions = await askGemini(query);
+  renderLLMSuggestions(panel, suggestions);
+}
+
+async function askGemini(query) {
+  // Build tight SIEM context
+  const topAlerts = liveState.alerts.slice(0, 8).map(h => {
+    const s = h._source || {};
+    return `[L${s.rule?.level ?? 0}] ${s.rule?.description || '?'} on ${s.agent?.name || 'mgr'}`;
+  }).join('; ') || 'No live alerts';
+
+  const aiSummary = liveState.aiRisks.agents?.slice(0, 3).map(e =>
+    `${e.agent}: ${e.risk} (${e.dominant_feature || '?'})`
+  ).join(', ') || 'AI engine offline';
+
+  const systemPrompt = `You are a concise SIEM analyst AI for SENTINEL. \nCurrent context:\n- Alerts: ${topAlerts}\n- AI risks: ${aiSummary}\n- Active agents: ${liveState.agents.length}\n\nUser query: \"${query}\"\n\nRespond with EXACTLY 4 investigation suggestions as a JSON array:\n[{\"title\":\"...\",\"category\":\"FORENSICS|THREAT HUNT|SECURITY|INVESTIGATE|AUDIT\",\"confidence\":85,\"detail\":\"one concise sentence\"}]\nKeep titles under 60 chars. No markdown, no extra text, just the JSON array.`;
+
+  try {
+    // Key is injected server-side by nginx — DO NOT add ?key= here
+    const res = await fetch(API.GEMINI_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        contents: [{ parts: [{ text: systemPrompt }] }],
+        generationConfig: { temperature: 0.4, maxOutputTokens: 400 },
+      }),
+    });
+    if (!res.ok) throw new Error('Gemini API error');
+    const d = await res.json();
+    const text = d.candidates?.[0]?.content?.parts?.[0]?.text || '[]';
+    // Extract JSON array from response
+    const match = text.match(/\[[\s\S]*\]/);
+    return match ? JSON.parse(match[0]) : [];
+  } catch (err) {
+    console.warn('Gemini error:', err);
+    return [];
+  }
+}
+
+// ============================================================
+// AI CHAT PANEL (floating, multi-turn, SIEM-aware)
+// ============================================================
+let chatHistory = [];   // [{role:'user'|'model', parts:[{text}]}]
+let chatOpen = false;
+
+function initChatPanel() {
+  if (document.getElementById('sentinel-chat-btn')) return;
+
+  // Floating button
+  const btn = document.createElement('button');
+  btn.id = 'sentinel-chat-btn';
+  btn.title = 'SENTINEL AI Chat';
+  btn.innerHTML = `
+    <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24"
+         fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+    </svg>
+    <span class="chat-badge" id="chat-badge" style="display:none">!</span>
+  `;
+  btn.style.cssText = [
+    'position:fixed;bottom:24px;right:24px;z-index:10000',
+    'width:52px;height:52px;border-radius:50%;border:none;cursor:pointer',
+    'background:linear-gradient(135deg,#00F0FF,#7B61FF)',
+    'color:#000;display:flex;align-items:center;justify-content:center',
+    'box-shadow:0 4px 20px rgba(0,240,255,0.4)',
+    'transition:transform 0.2s,box-shadow 0.2s',
+  ].join(';');
+  btn.addEventListener('mouseenter', () => btn.style.transform = 'scale(1.1)');
+  btn.addEventListener('mouseleave', () => btn.style.transform = 'scale(1)');
+  btn.addEventListener('click', toggleChatPanel);
+  document.body.appendChild(btn);
+
+  // Chat panel
+  const panel = document.createElement('div');
+  panel.id = 'sentinel-chat-panel';
+  panel.style.cssText = [
+    'position:fixed;bottom:88px;right:24px;z-index:9999',
+    'width:400px;height:540px;border-radius:14px;overflow:hidden',
+    'background:#0a0a0f;border:1px solid rgba(0,240,255,0.25)',
+    'box-shadow:0 20px 60px rgba(0,0,0,0.8)',
+    'display:none;flex-direction:column',
+    'font-family:"JetBrains Mono","Courier New",monospace',
+    'transition:opacity 0.2s,transform 0.2s',
+  ].join(';');
+  panel.innerHTML = `
+    <!-- Header -->
+    <div style="display:flex;align-items:center;justify-content:space-between;
+                padding:12px 16px;background:rgba(0,240,255,0.06);
+                border-bottom:1px solid rgba(0,240,255,0.15);flex-shrink:0">
+      <div style="display:flex;align-items:center;gap:8px">
+        <div style="width:8px;height:8px;border-radius:50%;background:#00F0FF;
+                    box-shadow:0 0 8px #00F0FF;animation:pulse 2s infinite"></div>
+        <span style="font-size:11px;letter-spacing:1.5px;color:#00F0FF;font-weight:600">SENTINEL AI</span>
+        <span style="font-size:10px;color:#606060">// NEURAL-LINK</span>
+      </div>
+      <div style="display:flex;gap:8px">
+        <button onclick="clearChat()" title="Clear chat"
+                style="background:none;border:none;color:#606060;cursor:pointer;font-size:10px;
+                       letter-spacing:1px;padding:2px 6px;border-radius:4px;
+                       border:1px solid rgba(255,255,255,0.06);
+                       transition:color 0.2s" onmouseenter="this.style.color='#FF2E63'"
+                onmouseleave="this.style.color='#606060'">CLR</button>
+        <button onclick="toggleChatPanel()" title="Close"
+                style="background:none;border:none;color:#606060;cursor:pointer;font-size:16px;
+                       line-height:1;padding:0 2px;transition:color 0.2s"
+                onmouseenter="this.style.color='#fff'"
+                onmouseleave="this.style.color='#606060'">×</button>
+      </div>
+    </div>
+    <!-- Messages -->
+    <div id="chat-messages" style="flex:1;overflow-y:auto;padding:12px 14px;
+         scrollbar-width:thin;scrollbar-color:rgba(0,240,255,0.2) transparent">
+      <div class="chat-msg model" style="margin-bottom:12px">
+        <div style="font-size:10px;color:#7B61FF;margin-bottom:4px;letter-spacing:1px">SENTINEL AI</div>
+        <div style="font-size:12px;color:#C0C0C0;line-height:1.6">
+          Neural link established. I have access to your live SIEM data.<br>
+          Ask me about threats, alerts, anomalies, or investigation steps.
+        </div>
+      </div>
+    </div>
+    <!-- Input -->
+    <div style="padding:10px 14px;border-top:1px solid rgba(255,255,255,0.07);flex-shrink:0;
+               background:rgba(0,0,0,0.3)">
+      <div style="display:flex;gap:8px;align-items:flex-end">
+        <textarea id="chat-input" rows="1" placeholder="Ask about threats, agents, alerts..."
+          style="flex:1;background:rgba(255,255,255,0.04);border:1px solid rgba(0,240,255,0.2);
+                 border-radius:8px;color:#e0e0e0;font-family:inherit;font-size:12px;
+                 padding:8px 12px;resize:none;outline:none;line-height:1.5;
+                 max-height:80px;overflow-y:auto;
+                 transition:border-color 0.2s"
+          onfocus="this.style.borderColor='rgba(0,240,255,0.5)'"
+          onblur="this.style.borderColor='rgba(0,240,255,0.2)'">
+        </textarea>
+        <button id="chat-send-btn" onclick="sendChatMessage()"
+          style="width:36px;height:36px;border-radius:8px;border:none;cursor:pointer;
+                 background:linear-gradient(135deg,#00F0FF,#7B61FF);
+                 color:#000;display:flex;align-items:center;justify-content:center;
+                 flex-shrink:0;transition:opacity 0.2s">
+          <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24"
+               fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"
+               stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon
+               points="22 2 15 22 11 13 2 9 22 2"/></svg>
+        </button>
+      </div>
+      <div style="font-size:9px;color:#404040;margin-top:6px;text-align:center">
+        Powered by Google AI Studio · Context-aware SIEM analysis
+      </div>
+    </div>
+  `;
+  document.body.appendChild(panel);
+
+  // Auto-resize textarea
+  const textarea = panel.querySelector('#chat-input');
+  textarea.addEventListener('input', () => {
+    textarea.style.height = 'auto';
+    textarea.style.height = Math.min(textarea.scrollHeight, 80) + 'px';
+  });
+  textarea.addEventListener('keydown', e => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      sendChatMessage();
+    }
+  });
+}
+
+function toggleChatPanel() {
+  const panel = document.getElementById('sentinel-chat-panel');
+  if (!panel) return;
+  chatOpen = !chatOpen;
+  panel.style.display = chatOpen ? 'flex' : 'none';
+  if (chatOpen) {
+    setTimeout(() => document.getElementById('chat-input')?.focus(), 50);
+    // Hide notification badge
+    const badge = document.getElementById('chat-badge');
+    if (badge) badge.style.display = 'none';
+  }
+}
+
+function clearChat() {
+  chatHistory = [];
+  const msgs = document.getElementById('chat-messages');
+  if (msgs) msgs.innerHTML = `
+    <div class="chat-msg model" style="margin-bottom:12px">
+      <div style="font-size:10px;color:#7B61FF;margin-bottom:4px;letter-spacing:1px">SENTINEL AI</div>
+      <div style="font-size:12px;color:#C0C0C0;line-height:1.6">
+        Chat cleared. Neural link re-established with live SIEM context.
+      </div>
+    </div>`;
+}
+
+async function sendChatMessage() {
+  const input = document.getElementById('chat-input');
+  const msgs = document.getElementById('chat-messages');
+  const sendBtn = document.getElementById('chat-send-btn');
+  if (!input || !msgs) return;
+
+  const text = input.value.trim();
+  if (!text) return;
+
+  // Clear input
+  input.value = '';
+  input.style.height = 'auto';
+
+  // Append user bubble
+  msgs.insertAdjacentHTML('beforeend', `
+    <div style="margin-bottom:12px;text-align:right">
+      <div style="font-size:10px;color:#00F0FF;margin-bottom:4px;letter-spacing:1px">YOU</div>
+      <div style="display:inline-block;background:rgba(0,240,255,0.08);
+                  border:1px solid rgba(0,240,255,0.2);border-radius:8px;
+                  padding:8px 12px;font-size:12px;color:#e0e0e0;line-height:1.6;
+                  max-width:90%;text-align:left">${escapeHtml(text)}</div>
+    </div>`);
+  scrollChatToBottom();
+
+  // Disable send while waiting
+  if (sendBtn) sendBtn.style.opacity = '0.4';
+
+  // Show typing indicator
+  const typingId = 'typing-' + Date.now();
+  msgs.insertAdjacentHTML('beforeend', `
+    <div id="${typingId}" style="margin-bottom:12px">
+      <div style="font-size:10px;color:#7B61FF;margin-bottom:4px;letter-spacing:1px">SENTINEL AI</div>
+      <div style="display:flex;gap:4px;padding:8px 0">
+        <span style="width:6px;height:6px;border-radius:50%;background:#7B61FF;
+                     animation:chatDot 1.2s 0s infinite"></span>
+        <span style="width:6px;height:6px;border-radius:50%;background:#7B61FF;
+                     animation:chatDot 1.2s 0.2s infinite"></span>
+        <span style="width:6px;height:6px;border-radius:50%;background:#7B61FF;
+                     animation:chatDot 1.2s 0.4s infinite"></span>
+      </div>
+    </div>`);
+  scrollChatToBottom();
+
+  // Build SIEM system context (injected once as first turn if history is empty)
+  const topAlerts = liveState.alerts.slice(0, 10).map(h => {
+    const s = h._source || {};
+    return `[L${s.rule?.level ?? 0}] ${s.rule?.description || '?'} — agent: ${s.agent?.name || 'mgr'}`;
+  }).join('\n') || 'No live alerts';
+  const aiSummary = liveState.aiRisks.agents?.slice(0, 5).map(e =>
+    `${e.agent}: ${e.risk} risk (${e.dominant_feature || '?'})`
+  ).join(', ') || 'AI engine offline';
+  const sysCtx = `You are SENTINEL AI, an expert SIEM security analyst assistant.\nYou have real-time access to the following live data from the SENTINEL SIEM platform:\n\nLIVE ALERTS (most recent 10):\n${topAlerts}\n\nAI RISK ANALYSIS:\n${aiSummary}\n\nACTIVE AGENTS: ${liveState.agents.length}\nGLOBAL RISK SCORE: ${liveState.aiRisks.global_risk != null ? (liveState.aiRisks.global_risk * 100).toFixed(1) + '/100' : 'unknown'}\n\nProvide concise, actionable security analysis. Use plain text with clear structure. Be direct and professional.`;
+
+  // Build conversation contents for the API
+  let contents = [];
+  if (chatHistory.length === 0) {
+    // Inject system context as a model "seed" turn
+    contents.push({ role: 'user', parts: [{ text: sysCtx + '\n\nUser message: ' + text }] });
+  } else {
+    // On subsequent turns, just include history + new message
+    contents = [
+      ...chatHistory,
+      { role: 'user', parts: [{ text }] },
+    ];
+  }
+
+  try {
+    const res = await fetch(API.GEMINI_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        contents,
+        generationConfig: { temperature: 0.5, maxOutputTokens: 800 },
+        safetySettings: [
+          { category: 'HARM_CATEGORY_HARASSMENT', threshold: 'BLOCK_NONE' },
+          { category: 'HARM_CATEGORY_HATE_SPEECH', threshold: 'BLOCK_NONE' },
+          { category: 'HARM_CATEGORY_DANGEROUS_CONTENT', threshold: 'BLOCK_NONE' },
+        ],
+      }),
+    });
+
+    const typing = document.getElementById(typingId);
+    if (typing) typing.remove();
+
+    if (!res.ok) {
+      const errBody = await res.text();
+      throw new Error(`HTTP ${res.status}: ${errBody}`);
+    }
+
+    const data = await res.json();
+    const reply = data.candidates?.[0]?.content?.parts?.[0]?.text || '(No response — check AI proxy config)';
+
+    // Update history (use original text for history, not the ctx-injected one)
+    if (chatHistory.length === 0) {
+      chatHistory.push({ role: 'user', parts: [{ text }] });
+    } else {
+      chatHistory.push({ role: 'user', parts: [{ text }] });
+    }
+    chatHistory.push({ role: 'model', parts: [{ text: reply }] });
+    // Keep history at most 20 turns to stay within token limits
+    if (chatHistory.length > 20) chatHistory = chatHistory.slice(-20);
+
+    msgs.insertAdjacentHTML('beforeend', `
+      <div style="margin-bottom:12px">
+        <div style="font-size:10px;color:#7B61FF;margin-bottom:4px;letter-spacing:1px">SENTINEL AI</div>
+        <div style="font-size:12px;color:#C0C0C0;line-height:1.7;white-space:pre-wrap;
+                    word-break:break-word">${formatChatReply(reply)}</div>
+      </div>`);
+
+  } catch (err) {
+    const typing = document.getElementById(typingId);
+    if (typing) typing.remove();
+    console.error('Chat error:', err);
+    msgs.insertAdjacentHTML('beforeend', `
+      <div style="margin-bottom:12px">
+        <div style="font-size:10px;color:#FF2E63;margin-bottom:4px;letter-spacing:1px">ERROR</div>
+        <div style="font-size:12px;color:#FF6B6B;line-height:1.6">
+          Neural link disrupted: ${escapeHtml(err.message)}<br>
+          <span style="color:#606060;font-size:10px">Check that docker is running and nginx proxy is configured.</span>
+        </div>
+      </div>`);
+  }
+
+  if (sendBtn) sendBtn.style.opacity = '1';
+  scrollChatToBottom();
+}
+
+function scrollChatToBottom() {
+  const msgs = document.getElementById('chat-messages');
+  if (msgs) msgs.scrollTop = msgs.scrollHeight;
+}
+
+function escapeHtml(str) {
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+function formatChatReply(text) {
+  // Basic markdown-like formatting: **bold**, `code`, bullet points
+  return escapeHtml(text)
+    .replace(/\*\*(.+?)\*\*/g, '<strong style="color:#e0e0e0">$1</strong>')
+    .replace(/`([^`]+)`/g, '<code style="background:rgba(0,240,255,0.07);padding:1px 4px;border-radius:3px;color:#00F0FF">$1</code>')
+    .replace(/^(\s*[-•]\s+)/gm, '<span style="color:#7B61FF">▸ </span>')
+    .replace(/^(\s*\d+\.\s+)/gm, '<span style="color:#7B61FF">$1</span>');
+}
+
+const categoryIcons = {
+  'FORENSICS': 'brain', 'THREAT HUNT': 'zap', 'SECURITY': 'shield',
+  'INVESTIGATE': 'search', 'AUDIT': 'terminal', 'DEFAULT': 'activity',
+};
+const categoryColors = {
+  'FORENSICS': '#00F0FF', 'THREAT HUNT': '#FF2E63', 'SECURITY': '#7B61FF',
+  'INVESTIGATE': '#EAB308', 'AUDIT': '#10B981', 'DEFAULT': '#A0A0A0',
+};
+
+function renderLLMSuggestions(panel, suggestions) {
+  if (!panel) return;
+  const header = panel.children[0]?.outerHTML || '';
+  const footer = panel.children[panel.children.length - 1]?.outerHTML || '';
+
+  const cards = suggestions.length > 0 ? suggestions.map(s => {
+    const cat = (s.category || 'DEFAULT').toUpperCase();
+    const icon = categoryIcons[cat] || categoryIcons.DEFAULT;
+    const col = categoryColors[cat] || categoryColors.DEFAULT;
+    return `
+      <div style="display:flex;gap:14px;align-items:flex-start;padding:14px 16px;border-bottom:1px solid rgba(255,255,255,0.05);cursor:pointer;transition:background 0.15s" onmouseenter="this.style.background='rgba(255,255,255,0.03)'" onmouseleave="this.style.background='transparent'">
+        <div style="width:36px;height:36px;border-radius:8px;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);display:flex;align-items:center;justify-content:center;color:${col};flex-shrink:0">${lucideIcon(icon, 16)}</div>
+        <div style="flex:1;min-width:0">
+          <div style="font-size:13px;color:#e0e0e0;margin-bottom:4px;font-weight:500">${s.title}</div>
+          <div style="display:flex;gap:8px;align-items:center;margin-bottom:4px">
+            <span style="font-size:10px;color:#606060;letter-spacing:1px">CATEGORY: <span style="color:${col}">${cat}</span></span>
+            <span style="font-size:10px;color:#606060">CONFIDENCE: <span style="color:#10B981">${s.confidence}%</span></span>
+          </div>
+          ${s.detail ? `<div style="font-size:11px;color:#808080">${s.detail}</div>` : ''}
+        </div>
+      </div>`;
+  }).join('') : `<div style="padding:20px;text-align:center;color:#606060;font-size:12px">No suggestions — try a more specific query</div>`;
+
+  panel.innerHTML = `
+    ${header}
+    ${cards}
+    ${footer}`;
 }
 
 // ── Fleet Distribution (real from Wazuh agent OS data) ────────────────────────
@@ -1307,10 +1849,10 @@ function initShieldTab() {
       else if (lvl >= 7) counts.Medium++;
       else counts.Low++;
     });
-    vulnData[0].value = counts.Critical || vulnData[0].value;
-    vulnData[1].value = counts.High || vulnData[1].value;
-    vulnData[2].value = counts.Medium || vulnData[2].value;
-    vulnData[3].value = counts.Low || vulnData[3].value;
+    vulnData[0].value = counts.Critical > 0 ? counts.Critical : vulnData[0].value;
+    vulnData[1].value = counts.High > 0 ? counts.High : vulnData[1].value;
+    vulnData[2].value = counts.Medium > 0 ? counts.Medium : vulnData[2].value;
+    vulnData[3].value = counts.Low > 0 ? counts.Low : vulnData[3].value;
 
     // Update CVE table with live alert descriptions
     const tbody = document.querySelector('.cve-table tbody');
@@ -1384,62 +1926,152 @@ function initShieldTab() {
 }
 
 // ============================================================
-// MATRIX TAB
+// MATRIX TAB → THREAT INTELLIGENCE HUB
 // ============================================================
 function buildMatrixTab() {
-  // --- LIVE: overlay real MITRE techniques from Indexer aggregation ---
+  // --- Merge live MITRE techniques ---
   if (liveState.mitreTechniques.length > 0) {
-    // Merge live techniques into activeTechniques
     liveState.mitreTechniques.forEach(t => {
       if (!activeTechniques.includes(t)) activeTechniques.push(t);
     });
   }
-  const cols = tactics.map(tactic => {
-    const techs = tactic.techniques.map(tech => {
-      const isActive = activeTechniques.includes(tech);
-      const isObserved = observedTechniques.includes(tech);
-      const cls = isActive ? 'active' : isObserved ? 'observed' : 'inactive';
-      return `<div class="matrix-technique ${cls}">${tech}</div>`;
-    }).join('');
 
+  // --- Tactic coverage cards ---
+  const tacticCards = tactics.map(tactic => {
+    const active = tactic.techniques.filter(t => activeTechniques.includes(t)).length;
+    const observed = tactic.techniques.filter(t => observedTechniques.includes(t) && !activeTechniques.includes(t)).length;
+    const clean = tactic.techniques.length - active - observed;
+    const hasThreat = active > 0;
+    const borderCol = hasThreat ? 'rgba(255,46,99,0.35)' : observed > 0 ? 'rgba(123,97,255,0.3)' : 'rgba(255,255,255,0.06)';
+    const dotCol = hasThreat ? '#FF2E63' : observed > 0 ? '#7B61FF' : '#10B981';
+    const pct = Math.round((active / Math.max(tactic.techniques.length, 1)) * 100);
     return `
-      <div class="matrix-col">
-        <div class="matrix-col-header">
-          <div class="matrix-col-name">${tactic.name}</div>
-          <div class="matrix-col-count">${tactic.techniques.length} Techniques</div>
+      <div class="glass-card" style="padding:14px 16px;border:1px solid ${borderCol};position:relative;overflow:hidden">
+        <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:8px">
+          <div>
+            <div style="font-size:11px;font-weight:600;color:#e0e0e0;margin-bottom:2px">${tactic.name}</div>
+            <div style="font-size:10px;color:#606060">${tactic.techniques.length} techniques</div>
+          </div>
+          <div style="width:8px;height:8px;border-radius:50%;background:${dotCol};margin-top:2px;${hasThreat ? 'box-shadow:0 0 6px ' + dotCol : ''}"></div>
         </div>
-        ${techs}
-      </div>
-    `;
+        <div style="display:flex;gap:8px;font-size:10px;margin-bottom:8px">
+          <span style="color:#FF2E63">${active} active</span>
+          <span style="color:#7B61FF">${observed} observed</span>
+          <span style="color:#606060">${clean} clean</span>
+        </div>
+        <div style="height:3px;background:rgba(255,255,255,0.06);border-radius:2px;overflow:hidden">
+          <div style="height:100%;width:${pct}%;background:${hasThreat ? '#FF2E63' : '#7B61FF'};border-radius:2px;transition:width 0.4s"></div>
+        </div>
+        <div style="position:absolute;bottom:0;right:0;font-size:48px;font-weight:700;color:rgba(255,255,255,0.02);line-height:1;pointer-events:none">${pct}</div>
+      </div>`;
   }).join('');
 
+  // --- Top Fired Rules from live alerts ---
+  const ruleCounts = {};
+  liveState.alerts.forEach(h => {
+    const s = h._source || {};
+    const id = s.rule?.id || '?';
+    const desc = s.rule?.description || 'Unknown';
+    const lvl = s.rule?.level ?? 0;
+    const key = id;
+    if (!ruleCounts[key]) ruleCounts[key] = { id, desc, lvl, count: 0, agents: new Set() };
+    ruleCounts[key].count++;
+    ruleCounts[key].agents.add(s.agent?.name || 'mgr');
+  });
+  const topRules = Object.values(ruleCounts)
+    .sort((a, b) => b.count - a.count)
+    .slice(0, 8);
+
+  const ruleRows = topRules.length > 0 ? topRules.map(r => {
+    const col = r.lvl >= 13 ? '#FF2E63' : r.lvl >= 10 ? '#f97316' : r.lvl >= 7 ? '#EAB308' : '#10B981';
+    return `
+      <tr>
+        <td style="padding:8px 12px;color:#606060;font-size:11px">${r.id}</td>
+        <td style="padding:8px 12px;color:#e0e0e0;font-size:12px;max-width:280px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${r.desc}</td>
+        <td style="padding:8px 12px;text-align:center"><span style="color:${col};font-weight:600;font-size:12px">${r.lvl}</span></td>
+        <td style="padding:8px 12px;color:#00F0FF;font-size:12px;font-weight:600">${r.count}</td>
+        <td style="padding:8px 12px;color:#A0A0A0;font-size:11px">${[...r.agents].slice(0, 2).join(', ')}${r.agents.size > 2 ? ` +${r.agents.size - 2}` : ''}</td>
+      </tr>`;
+  }).join('') : `<tr><td colspan="5" style="padding:20px;text-align:center;color:#606060;font-size:12px">No live alert data — connect to Wazuh Indexer</td></tr>`;
+
+  // --- Threat actor summary from AI engine ---
+  const aiAgents = liveState.aiRisks.agents || [];
+  const critCountAI = aiAgents.filter(a => a.risk === 'CRITICAL').length;
+  const highCountAI = aiAgents.filter(a => a.risk === 'HIGH').length;
+
   return `
-    <div>
-      <div class="matrix-header">
+    <div style="display:flex;flex-direction:column;gap:20px">
+
+      <!-- Header row -->
+      <div style="display:flex;justify-content:space-between;align-items:center">
         <div>
-          <h2 class="matrix-title">${lucideIcon('crosshair', 24)} MITRE ATT&amp;CK® Matrix</h2>
-          <p class="matrix-subtitle">Real-time threat mapping based on recent log activity and behavioral analysis.</p>
+          <h2 style="font-size:18px;font-weight:700;color:#fff;margin:0;display:flex;align-items:center;gap:8px">${lucideIcon('crosshair', 20)} Threat Intelligence Hub</h2>
+          <p style="font-size:12px;color:#606060;margin:4px 0 0">Live ATT&amp;CK tactic coverage · Top fired rules · ML risk summary</p>
         </div>
-        <div class="matrix-legend">
-          <div class="matrix-legend-item">
-            <div class="matrix-legend-box" style="background:#FF2E63;box-shadow:0 0 8px #FF2E63"></div>
-            <span class="matrix-legend-label">Active Threat</span>
+        <div style="display:flex;gap:12px">
+          <div style="background:rgba(255,46,99,0.1);border:1px solid rgba(255,46,99,0.3);border-radius:6px;padding:8px 14px;text-align:center">
+            <div style="font-size:18px;font-weight:700;color:#FF2E63">${critCountAI || liveState.alerts.filter(h => (h._source?.rule?.level ?? 0) >= 13).length}</div>
+            <div style="font-size:10px;color:#606060">CRITICAL</div>
           </div>
-          <div class="matrix-legend-item">
-            <div class="matrix-legend-box" style="background:rgba(123,97,255,0.4)"></div>
-            <span class="matrix-legend-label">Observed</span>
+          <div style="background:rgba(249,115,22,0.1);border:1px solid rgba(249,115,22,0.3);border-radius:6px;padding:8px 14px;text-align:center">
+            <div style="font-size:18px;font-weight:700;color:#f97316">${highCountAI || liveState.alerts.filter(h => { const l = (h._source?.rule?.level ?? 0); return l >= 10 && l < 13; }).length}</div>
+            <div style="font-size:10px;color:#606060">HIGH</div>
           </div>
-          <div class="matrix-legend-item">
-            <div class="matrix-legend-box" style="background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.1)"></div>
-            <span class="matrix-legend-label">Inactive</span>
+          <div style="background:rgba(0,240,255,0.08);border:1px solid rgba(0,240,255,0.2);border-radius:6px;padding:8px 14px;text-align:center">
+            <div style="font-size:18px;font-weight:700;color:#00F0FF">${activeTechniques.length}</div>
+            <div style="font-size:10px;color:#606060">ACTIVE TTPs</div>
           </div>
         </div>
       </div>
 
-      <div class="matrix-scroll scrollbar-hide">
-        <div class="matrix-grid">${cols}</div>
+      <!-- Tactic Grid -->
+      <div class="glass-card" style="padding:18px 20px">
+        <div style="font-size:11px;letter-spacing:1.5px;color:#A0A0A0;margin-bottom:14px">ATT&amp;CK TACTIC COVERAGE</div>
+        <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px">${tacticCards}</div>
       </div>
 
+      <!-- Top Rules + AI Risk row -->
+      <div style="display:grid;grid-template-columns:1fr 320px;gap:16px">
+
+        <!-- Top Fired Rules -->
+        <div class="glass-card" style="padding:18px 20px">
+          <div style="font-size:11px;letter-spacing:1.5px;color:#A0A0A0;margin-bottom:14px">TOP FIRED RULES (LIVE)</div>
+          <div style="overflow-x:auto">
+            <table style="width:100%;border-collapse:collapse">
+              <thead>
+                <tr style="border-bottom:1px solid rgba(255,255,255,0.07)">
+                  ${['RULE ID', 'DESCRIPTION', 'LVL', 'COUNT', 'AGENTS'].map(h => `<th style="padding:6px 12px;text-align:left;font-size:10px;color:#606060;font-weight:400;letter-spacing:1px">${h}</th>`).join('')}
+                </tr>
+              </thead>
+              <tbody>${ruleRows}</tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- AI Risk Leaderboard -->
+        <div class="glass-card" style="padding:18px 20px">
+          <div style="font-size:11px;letter-spacing:1.5px;color:#A0A0A0;margin-bottom:14px">AI RISK LEADERBOARD</div>
+          ${aiAgents.length > 0
+      ? aiAgents.sort((a, b) => b.score - a.score).slice(0, 7).map(e => {
+        const col = e.risk === 'CRITICAL' ? '#FF2E63' : e.risk === 'HIGH' ? '#f97316' : e.risk === 'MEDIUM' ? '#EAB308' : '#10B981';
+        const pct = Math.round(e.score * 100);
+        return `
+                <div style="margin-bottom:10px">
+                  <div style="display:flex;justify-content:space-between;margin-bottom:4px">
+                    <span style="font-size:12px;color:#e0e0e0">${e.agent}</span>
+                    <span style="font-size:11px;color:${col};font-weight:600">${e.risk}</span>
+                  </div>
+                  <div style="height:4px;background:rgba(255,255,255,0.06);border-radius:2px;overflow:hidden">
+                    <div style="height:100%;width:${pct}%;background:${col};border-radius:2px"></div>
+                  </div>
+                </div>`;
+      }).join('')
+      : '<div style="font-size:12px;color:#606060;text-align:center;padding:20px">AI engine offline<br><span style="font-size:10px">Run ai-engine service to see risk scores</span></div>'
+    }
+        </div>
+      </div>
+
+      <!-- MITRE alert banner -->
       ${buildMitreAlertBanner()}
     </div>
   `;

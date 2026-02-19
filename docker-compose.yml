@@ -90,9 +90,13 @@ services:
     restart: always
     ports:
       - "80:80"
+    environment:
+      # Key is read from .env — envsubst injects it into nginx.conf.template at startup
+      - GEMINI_KEY=${GEMINI_KEY}
     volumes:
       - ./dashboard:/usr/share/nginx/html
-      - ./config/nginx.conf:/etc/nginx/nginx.conf:ro
+      # nginx:alpine auto-runs envsubst on files in /etc/nginx/templates/ → /etc/nginx/conf.d/
+      - ./config/nginx.conf.template:/etc/nginx/templates/default.conf.template:ro
       - ai-shared-data:/usr/share/nginx/html/data:ro
     depends_on:
       - wazuh.manager
