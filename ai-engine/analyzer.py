@@ -55,7 +55,7 @@ MODEL_FILE    = "/shared_data/model.pkl"
 
 SCAN_INTERVAL  = 30    # seconds between normal scans
 FEATURE_WINDOW = 5     # minutes of history per scan
-WARMUP_CYCLES  = 3     # cycles before first scoring
+WARMUP_CYCLES  = 1     # cycles before first scoring
 OFFLINE_RETRY  = 10    # seconds between offline retries
 BOOT_DELAY     = 20    # seconds to wait for Indexer on first start
 CONTAMINATION  = 0.1   # IsolationForest anomaly fraction
@@ -166,6 +166,7 @@ def run_engine() -> None:
     model: IsolationForest | None = load_model()
     baseline: np.ndarray | None   = None
     last_good_output: dict | None = None
+    all_known_agents: set[str]    = set()
 
     logger.info("AI Engine online — boot delay %ds.", BOOT_DELAY)
     time.sleep(BOOT_DELAY)
@@ -180,14 +181,33 @@ def run_engine() -> None:
             # ── 2. Feature extraction ─────────────────────────────────────────
             agent_features = feature_builder.build_features(client, FEATURE_WINDOW)
 
+            # Update known agents list
+            params_agents = {af["agent"] for af in agent_features}
+            if not all_known_agents and not params_agents:
+                 # First run, no alerts? Try discovery
+                 discovered = feature_builder.discover_agents(client)
+                 all_known_agents.update(discovered)
+            
+            all_known_agents.update(params_agents)
+
+            # If no recent alerts for an agent, add a zero-vector entry for them
+            current_agents = {af["agent"] for af in agent_features}
+            missing = all_known_agents - current_agents
+            for m in missing:
+                agent_features.append(feature_builder.zero_vector_entry(m))
+
             if not agent_features:
-                # No recent alerts — use zero vectors for known agents
-                known          = feature_builder.discover_agents(client)
-                agent_features = [zero_vector_entry(a) for a in known]
-                if not agent_features:
-                    logger.info("No agents found — skipping cycle.")
-                    time.sleep(SCAN_INTERVAL)
-                    continue
+                # Still no agents?
+                logger.info("No agents found in indexer or history.")
+                # We should still output an empty OK state to clear the UI
+                write_output({
+                    "timestamp":   utc_now(),
+                    "status":      "OK",
+                    "global_risk": 0.0,
+                    "agents":      [],
+                })
+                time.sleep(SCAN_INTERVAL)
+                continue
 
             # Add current vectors to rolling history
             new_vectors = [af["feature_vector"] for af in agent_features]

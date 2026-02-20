@@ -8,54 +8,13 @@
 // ============================================================
 // DATA
 // ============================================================
-const recentLogs = [
-  { id: 1, severity: 'critical', msg: 'Unauthorized shell access attempt from 192.168.1.45', time: '12:45:01', source: 'K8S-NODE-03' },
-  { id: 2, severity: 'warning', msg: 'Multiple failed SSH logins: root', time: '12:44:22', source: 'AUTH-SRV' },
-  { id: 3, severity: 'low', msg: 'Configuration file changed: /etc/nginx/nginx.conf', time: '12:43:55', source: 'WEB-PROXY-01' },
-  { id: 4, severity: 'low', msg: 'New container deployed: redis-cache-temp', time: '12:40:10', source: 'PROD-CLUSTER' },
-  { id: 5, severity: 'critical', msg: 'Data exfiltration signature detected on outbound port 443', time: '12:38:44', source: 'FW-CORE-01' },
-];
-
-const aiAlerts = [
-  {
-    id: 1, score: 92, type: 'Brute Force Detection', time: '2 mins ago', severity: 'high',
-    description: 'Detected brute-force pattern. 15 failed root logins followed by successful shell access. MITRE T1078.',
-    details: {
-      sourceIp: '185.12.5.210', target: 'PROD-DATABASE-01', eventsCount: 42,
-      raw: '{"timestamp": "2026-02-17T12:45:01Z",\n "event_type": "ssh_login",\n "status": "failed",\n "user": "root",\n "src_ip": "185.12.5.210"}'
-    }
-  },
-  {
-    id: 2, score: 78, type: 'Data Exfiltration', time: '14 mins ago', severity: 'medium',
-    description: 'Anomalous outbound traffic volume detected to unauthorized cloud storage endpoint.',
-    details: {
-      sourceIp: '10.0.1.55', target: 'AWS-S3-GLO-01', eventsCount: 15,
-      raw: '{"timestamp": "2026-02-17T12:31:22Z",\n "traffic_mb": 1450,\n "destination": "ext-storage.io"}'
-    }
-  }
-];
-
-const agents = Array.from({ length: 35 }, (_, i) => ({
-  id: i,
-  status: i === 5 || i === 12 ? 'threat' : i % 8 === 0 ? 'inactive' : 'healthy',
-  name: `SRV-${String(i).padStart(2, '0')}`,
-  os: 'Linux',
-}));
-
-const vulnData = [
-  { name: 'Critical', value: 12, color: '#FF2E63' },
-  { name: 'High', value: 25, color: '#F97316' },
-  { name: 'Medium', value: 48, color: '#EAB308' },
-  { name: 'Low', value: 110, color: '#00F0FF' },
-];
-
-const cves = [
-  { id: 'CVE-2024-21626', pkg: 'runc', severity: 'Critical', score: 9.8, status: 'Patch Pending' },
-  { id: 'CVE-2023-48795', pkg: 'openssh', severity: 'High', score: 7.5, status: 'Assessing' },
-  { id: 'CVE-2024-0567', pkg: 'gnutls', severity: 'High', score: 7.8, status: 'Mitigated' },
-  { id: 'CVE-2023-44487', pkg: 'http2', severity: 'Critical', score: 9.1, status: 'Reboot Required' },
-  { id: 'CVE-2024-21626', pkg: 'libcontainer', severity: 'Critical', score: 9.8, status: 'Patch Pending' },
-];
+const recentLogs = []; // Will use liveState.alerts
+const aiAlerts = []; // Will use liveState.aiRisks
+const agents = []; // Will use liveState.agents
+const vulnData = []; // Will use new liveState.vulns
+const cves = []; // Will use new liveState.vulns
+const activeTechniques = [];
+const observedTechniques = [];
 
 const tactics = [
   { name: 'Initial Access', techniques: ['Drive-by Compromise', 'Public-Facing App', 'External Remote Services', 'Hardware Additions', 'Phishing', 'Replication Through Removable Media', 'Valid Accounts'] },
@@ -72,8 +31,7 @@ const tactics = [
   { name: 'Impact', techniques: ['Account Access Removal', 'Data Destruction', 'Data Encrypted for Impact', 'Data Manipulation', 'Defacement', 'Disk Wipe', 'Endpoint Denial of Service', 'Firmware Corruption', 'Inhibit System Recovery', 'Network Denial of Service', 'Resource Hijacking', 'Service Stop', 'System Shutdown/Reboot'] },
 ];
 
-const activeTechniques = ['Brute Force', 'Valid Accounts', 'Phishing', 'Process Injection', 'Data Encrypted for Impact', 'Web Shell', 'Cloud Infrastructure Discovery'];
-const observedTechniques = ['Phishing', 'Command and Scripting Interpreter'];
+
 
 // ============================================================
 // STATE
@@ -105,6 +63,8 @@ let liveState = {
   alerts: [],   // raw Indexer hits
   aiRisks: {},   // ai_risks.json object
   mitreTechniques: [], // active technique names from live alerts
+  vulns: [],    // aggregated vulnerability data
+  cveStats: { critical: 0, high: 0, medium: 0, low: 0 },
 };
 
 async function apiAuth() {
@@ -167,8 +127,60 @@ async function apiFetchAiRisks() {
   } catch (e) { /* ai engine not ready */ }
 }
 
+async function apiFetchVulnerabilities() {
+  if (!liveState.mgrToken) return;
+  try {
+    // Fetch vulnerability summary for all agents
+    const res = await fetch(`${API.MANAGER}/vulnerability/000?limit=1`, { // Check generic info first
+      headers: { Authorization: `Bearer ${liveState.mgrToken}` },
+    });
+    // In a real deployment we'd aggregate across all agents. 
+    // For now, let's fetch the last 50 vulnerabilities from ALL agents (using specific endpoint if available, else query alerts)
+
+    // Better approach: Query wazuh-alerts for vulnerability-detector alerts
+    const query = {
+      size: 100,
+      sort: [{ '@timestamp': 'desc' }],
+      query: { term: { 'rule.groups': 'vulnerability-detector' } }
+    };
+    const creds = btoa(`${API.IDX_USER}:${API.IDX_PASS}`);
+    const res2 = await fetch(`${API.INDEXER}/wazuh-alerts-*/_search`, {
+      method: 'POST',
+      headers: { Authorization: `Basic ${creds}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify(query),
+    });
+
+    if (res2.ok) {
+      const d = await res2.json();
+      const hits = d.hits?.hits || [];
+      liveState.vulns = hits.map(h => {
+        const s = h._source || {};
+        return {
+          cve: s.data?.vulnerability?.cve || 'UNKNOWN',
+          severity: s.data?.vulnerability?.severity || 'Low',
+          package: s.data?.vulnerability?.package?.name || 'unknown',
+          agent: s.agent?.name || '—',
+          score: s.data?.vulnerability?.score || 0,
+          status: 'Active'
+        };
+      });
+
+      // aggregations
+      let c = 0, h = 0, m = 0, l = 0;
+      liveState.vulns.forEach(v => {
+        const sev = v.severity.toLowerCase();
+        if (sev === 'critical') c++;
+        else if (sev === 'high') h++;
+        else if (sev === 'medium') m++;
+        else l++;
+      });
+      liveState.cveStats = { critical: c, high: h, medium: m, low: l };
+    }
+  } catch (e) { console.error(e); }
+}
+
 async function refreshLiveData() {
-  await Promise.all([apiFetchAgents(), apiFetchAlerts(), apiFetchAiRisks()]);
+  await Promise.all([apiFetchAgents(), apiFetchAlerts(), apiFetchAiRisks(), apiFetchVulnerabilities()]);
   // Re-render active tab with fresh data
   const content = document.getElementById('tab-content');
   if (content) {
@@ -203,10 +215,10 @@ function updateFooterStatus() {
 }
 
 function updateTopBarEps() {
-  const epsEl = document.querySelector('.topbar-eps-value');
+  const epsEl = document.getElementById('topbar-eps-val') || document.querySelector('.topbar-eps-value');
   if (!epsEl || liveState.alerts.length === 0) return;
   // Rough EPS estimate from alert count
-  epsEl.textContent = `${liveState.alerts.length * 12} EPS`;
+  epsEl.textContent = `${(liveState.alerts.length * 12).toLocaleString()} EPS`;
 }
 
 // ============================================================
@@ -264,8 +276,6 @@ async function initApp() {
   renderFooter();
   setActiveTab('nexus');
 
-  // Wire search bar to Gemini LLM suggestions
-  setTimeout(() => initSearchBar(), 200);
   // Launch floating AI chat panel
   setTimeout(() => initChatPanel(), 300);
 
@@ -351,17 +361,15 @@ function setActiveTab(tab) {
 function renderTopBar() {
   const topbar = document.getElementById('topbar');
   topbar.innerHTML = `
-    <div class="topbar-search-wrap">
-      <div class="topbar-search-icon">
-        <span>&gt;</span>
-        ${lucideIcon('search', 16)}
-      </div>
-      <input class="topbar-search" type="text" placeholder="search logs, threats, or assets..." />
+    <div class="topbar-brand">
+      <div class="topbar-brand-dot"></div>
+      <span class="topbar-brand-label">SENTINEL SIEM</span>
+      <span class="topbar-brand-version">v4.0.2</span>
     </div>
     <div class="topbar-right">
       <div>
         <div class="topbar-eps-label">System Pulse</div>
-        <div class="topbar-eps-value">1,240 EPS</div>
+        <div class="topbar-eps-value" id="topbar-eps-val">— EPS</div>
       </div>
       <canvas id="sparkline-canvas" width="96" height="40"></canvas>
       <div class="topbar-divider"></div>
@@ -443,7 +451,11 @@ function renderTab(tab) {
   switch (tab) {
     case 'nexus': content.innerHTML = buildNexusTab(); setTimeout(initNexusTab, 50); break;
     case 'hunter': content.innerHTML = buildHunterTab(); setTimeout(initHunterTab, 50); break;
-    case 'fleet': content.innerHTML = buildFleetTab(); break;
+    // Fleet: build HTML first, then run both post-DOM helpers
+    case 'fleet':
+      content.innerHTML = buildFleetTab();
+      setTimeout(buildFleetDistribution, 50);
+      break;
     case 'shield': content.innerHTML = buildShieldTab(); setTimeout(initShieldTab, 50); break;
     case 'matrix': content.innerHTML = buildMatrixTab(); break;
     default: content.innerHTML = buildNexusTab(); setTimeout(initNexusTab, 50);
@@ -655,25 +667,49 @@ function initNexusTab() {
 // HUNTER TAB
 // ============================================================
 function buildHunterTab() {
-  const alert = aiAlerts.find(a => a.id === selectedAlertId) || aiAlerts[0];
+  const agents = liveState.aiRisks.agents || [];
+  const status = liveState.aiRisks.status || 'OFFLINE';
 
-  const alertCards = aiAlerts.map(a => `
-    <div class="glass-card hunter-alert-card ${a.id === selectedAlertId ? 'active' : ''}"
-         data-alert-id="${a.id}" style="cursor:pointer">
+  if (agents.length === 0) {
+    return `
+      <div style="display:flex;flex-direction:column;align-items:center;justify-content:center;height:100%;color:#606060;text-align:center">
+        <div style="font-size:48px;margin-bottom:20px;color:#00F0FF;opacity:0.5">${lucideIcon('brain', 64)}</div>
+        <h2 style="color:#e0e0e0;margin-bottom:8px">AI Engine Status: <span style="color:#00F0FF">${status}</span></h2>
+        <p style="max-width:400px;line-height:1.6">
+          The Isolation Forest model is analyzing event streams. <br>
+          Alerts will appear here when anomalies effectively deviate from the baseline.
+        </p>
+      </div>`;
+  }
+
+  // Auto-select first if none selected, or validation check
+  const selectedIdx = (typeof selectedAlertId === 'number' && selectedAlertId < agents.length) ? selectedAlertId : 0;
+  selectedAlertId = selectedIdx; // Sync state
+  const selected = agents[selectedIdx];
+
+  const alertCards = agents.map((a, i) => {
+    const sev = a.risk === 'CRITICAL' ? 'high' : a.risk === 'HIGH' ? 'medium' : 'low';
+    const scorePct = Math.round(a.score * 100);
+    return `
+    <div class="glass-card hunter-alert-card ${i === selectedIdx ? 'active' : ''}"
+         data-live-index="${i}" style="cursor:pointer">
       <div class="hunter-alert-top">
-        <span class="hunter-score ${a.severity}">Score: ${a.score}</span>
-        <span class="hunter-alert-time">${a.time}</span>
+        <span class="hunter-score ${sev}">Score: ${scorePct}</span>
+        <span class="hunter-alert-time">Live</span>
       </div>
-      <div class="hunter-alert-type">${a.type}</div>
-      <div class="hunter-alert-desc">${a.description}</div>
-    </div>
-  `).join('');
+      <div class="hunter-alert-type">${a.agent}</div>
+      <div class="hunter-alert-desc">Risk: ${a.risk} — ${a.dominant_feature}</div>
+    </div>`;
+  }).join('');
+
+  const scorePct = Math.round(selected.score * 100);
+  const eventCount = selected.features ? Object.values(selected.features).reduce((a, b) => a + b, 0) : 0;
 
   return `
     <div class="hunter-grid">
       <!-- Feed -->
       <div class="hunter-feed scrollbar-hide">
-        <div class="hunter-feed-title">${lucideIcon('brain', 14)} AI Analysis Feed</div>
+        <div class="hunter-feed-title">${lucideIcon('brain', 14)} AI Analysis Feed (${status})</div>
         ${alertCards}
       </div>
 
@@ -686,34 +722,37 @@ function buildHunterTab() {
             <div class="hunter-gauge-wrap">
               <canvas id="hunter-gauge" width="192" height="192"></canvas>
               <div class="hunter-gauge-label">
-                <span class="hunter-gauge-score" id="gauge-score">${alert.score}</span>
-                <span class="hunter-gauge-text">Isolation Score</span>
+                <span class="hunter-gauge-score" id="gauge-score">${scorePct}</span>
+                <span class="hunter-gauge-text">Anomaly Score</span>
               </div>
             </div>
             <!-- Details -->
             <div class="hunter-details">
-              <h1 id="inspector-type">${alert.type}</h1>
+              <h1 id="inspector-type">${selected.agent}</h1>
               <div class="hunter-meta-row">
                 <div class="hunter-meta-box">
                   <div class="hunter-meta-box-label">Target Asset</div>
-                  <div class="hunter-meta-box-value" id="inspector-target">${alert.details.target}</div>
+                  <div class="hunter-meta-box-value" id="inspector-target">${selected.agent}</div>
                 </div>
                 <div class="hunter-meta-box">
-                  <div class="hunter-meta-box-label">Source IP</div>
-                  <div class="hunter-meta-box-value white" id="inspector-ip">${alert.details.sourceIp}</div>
+                  <div class="hunter-meta-box-label">Timestamp</div>
+                  <div class="hunter-meta-box-value white" id="inspector-time">${liveState.aiRisks.timestamp || 'Just now'}</div>
                 </div>
                 <div class="hunter-meta-box">
-                  <div class="hunter-meta-box-label">Events</div>
-                  <div class="hunter-meta-box-value white" id="inspector-events">${alert.details.eventsCount}</div>
+                  <div class="hunter-meta-box-label">Events (Window)</div>
+                  <div class="hunter-meta-box-value white" id="inspector-events">${eventCount}</div>
                 </div>
               </div>
               <div class="hunter-llm-box">
                 <div class="hunter-llm-icon">${lucideIcon('terminal', 16)}</div>
                 <div style="flex:1">
                   <div class="hunter-llm-header">
-                    <span class="hunter-llm-label">LLM INSIGHT ENGINE</span>
+                    <span class="hunter-llm-label">INSIGHT ENGINE</span>
                   </div>
-                  <p class="hunter-llm-text"><span class="hunter-cursor">_</span> <span id="inspector-desc">${alert.description}</span></p>
+                  <p class="hunter-llm-text">
+                    <span class="hunter-cursor">_</span>
+                    <span id="inspector-desc">Detected ${selected.risk} anomaly driven by <span class="highlight">${selected.dominant_feature}</span> deviation.</span>
+                  </p>
                 </div>
               </div>
             </div>
@@ -721,17 +760,19 @@ function buildHunterTab() {
 
           <!-- Evidence -->
           <div>
-            <div class="hunter-evidence-title">${lucideIcon('search', 14)} Evidence &amp; Forensics</div>
+            <div class="hunter-evidence-title">${lucideIcon('search', 14)} Feature Evidence</div>
             <div class="hunter-evidence-grid">
               <div class="hunter-json-card">
-                <div class="hunter-json-label">Raw JSON Payload</div>
-                <pre class="hunter-json-pre" id="inspector-raw">${alert.details.raw}</pre>
+                <div class="hunter-json-label">Feature Vector</div>
+                <pre class="hunter-json-pre" id="inspector-raw">${JSON.stringify(selected.features, null, 2)}</pre>
               </div>
               <div class="hunter-action-card">
                 <div class="hunter-action-icon">${lucideIcon('zap', 24)}</div>
                 <div>
                   <div class="hunter-action-title">Recommended Action</div>
-                  <div class="hunter-action-desc" id="inspector-action">Auto-isolate host and revoke temporary credentials for source IP ${alert.details.sourceIp}</div>
+                  <div class="hunter-action-desc" id="inspector-action">
+                    ${selected.risk === 'CRITICAL' ? 'Immediate isolation required.' : 'Monitor for escalation.'}
+                  </div>
                 </div>
               </div>
             </div>
@@ -743,116 +784,51 @@ function buildHunterTab() {
 }
 
 function initHunterTab() {
-  // --- LIVE: inject AI risk cards from new schema {timestamp, global_risk, agents:[...]} ---
-  const feedEl = document.querySelector('.hunter-feed');
-  const liveAgents = liveState.aiRisks.agents;
-  const engineStatus = liveState.aiRisks.status;
+  const agents = liveState.aiRisks.agents || [];
+  if (agents.length === 0) return;
 
-  if (feedEl && Array.isArray(liveAgents) && liveAgents.length > 0) {
-    const liveCards = liveAgents.map((entry, i) => {
-      const sev = entry.risk === 'CRITICAL' ? 'high' : entry.risk === 'HIGH' ? 'medium' : 'low';
-      const scorePct = Math.round(entry.score * 100);
-      const isActive = i === 0;
-      return `
-        <div class="glass-card hunter-alert-card ${isActive ? 'active' : ''}" data-live-index="${i}" style="cursor:pointer">
-          <div class="hunter-alert-top">
-            <span class="hunter-score ${sev}">Score: ${scorePct}</span>
-            <span class="hunter-alert-time">live</span>
-          </div>
-          <div class="hunter-alert-type">${entry.agent}</div>
-          <div class="hunter-alert-desc">Risk: ${entry.risk} — Dominant signal: ${entry.dominant_feature || '—'}</div>
-        </div>`;
-    }).join('');
-
-    const statusLabel = engineStatus === 'LEARNING' ? ' (Warming Up)' : engineStatus === 'DEGRADED' ? ' (Degraded)' : ' (Live)';
-    feedEl.innerHTML = `<div class="hunter-feed-title">${lucideIcon('brain', 14)} AI Analysis Feed${statusLabel}</div>${liveCards}`;
-
-    // Populate inspector with first agent
-    const first = liveAgents[0];
-    const scorePct = Math.round(first.score * 100);
-    const typeEl = document.getElementById('inspector-type');
-    const descEl = document.getElementById('inspector-desc');
-    const targetEl = document.getElementById('inspector-target');
-    const ipEl = document.getElementById('inspector-ip');
-    const eventsEl = document.getElementById('inspector-events');
-    const rawEl = document.getElementById('inspector-raw');
-    const actionEl = document.getElementById('inspector-action');
-    const scoreEl = document.getElementById('gauge-score');
-    if (typeEl) typeEl.textContent = first.agent;
-    if (descEl) descEl.textContent = `Risk: ${first.risk} — Dominant signal: ${first.dominant_feature || 'none'}. Timestamp: ${liveState.aiRisks.timestamp || '—'}`;
-    if (targetEl) targetEl.textContent = first.agent;
-    if (ipEl) ipEl.textContent = first.top_source_ip || 'N/A';
-    if (eventsEl) eventsEl.textContent = `${first.features ? Object.values(first.features).reduce((a, b) => a + b, 0) : '—'} events`;
-    if (rawEl) rawEl.textContent = JSON.stringify(first, null, 2);
-    if (actionEl) actionEl.textContent = first.risk === 'CRITICAL' || first.risk === 'HIGH'
-      ? `Investigate ${first.agent} immediately — anomaly score ${first.score.toFixed(3)}, trigger: ${first.dominant_feature}`
-      : `Monitor ${first.agent} — risk ${first.risk}, score ${first.score.toFixed(3)}`;
-    if (scoreEl) scoreEl.textContent = scorePct;
-
-    // Wire card clicks to update inspector
-    feedEl.querySelectorAll('.hunter-alert-card').forEach(card => {
-      card.addEventListener('click', () => {
-        const idx = parseInt(card.dataset.liveIndex ?? 0);
-        const entry = liveAgents[idx];
-        if (!entry) return;
-        feedEl.querySelectorAll('.hunter-alert-card').forEach(c => c.classList.remove('active'));
-        card.classList.add('active');
-        const sp = Math.round(entry.score * 100);
-        if (typeEl) typeEl.textContent = entry.agent;
-        if (descEl) descEl.textContent = `Risk: ${entry.risk} — Dominant signal: ${entry.dominant_feature || 'none'}. Timestamp: ${liveState.aiRisks.timestamp || '—'}`;
-        if (targetEl) targetEl.textContent = entry.agent;
-        if (ipEl) ipEl.textContent = entry.top_source_ip || 'N/A';
-        if (eventsEl) eventsEl.textContent = `${entry.features ? Object.values(entry.features).reduce((a, b) => a + b, 0) : '—'} events`;
-        if (rawEl) rawEl.textContent = JSON.stringify(entry, null, 2);
-        if (actionEl) actionEl.textContent = entry.risk === 'CRITICAL' || entry.risk === 'HIGH'
-          ? `Investigate ${entry.agent} immediately — anomaly score ${entry.score.toFixed(3)}, trigger: ${entry.dominant_feature}`
-          : `Monitor ${entry.agent} — risk ${entry.risk}, score ${entry.score.toFixed(3)}`;
-        if (scoreEl) scoreEl.textContent = sp;
-        if (hunterGaugeChart) {
-          hunterGaugeChart.data.datasets[0].data = [sp, 100 - sp];
-          hunterGaugeChart.update();
-        }
-      });
-    });
-  } else {
-    // Fallback: static alert cards wired with old mock data
-    document.querySelectorAll('.hunter-alert-card').forEach(card => {
-      card.addEventListener('click', () => {
-        selectedAlertId = parseInt(card.dataset.alertId) || 1;
-        renderTab('hunter');
-        setTimeout(initHunterTab, 50);
-      });
+  // Initialize Gauge Chart
+  const ctx = document.getElementById('hunter-gauge');
+  if (ctx && !hunterGaugeChart) {
+    hunterGaugeChart = new Chart(ctx, {
+      type: 'doughnut',
+      data: {
+        labels: ['Risk', 'Safe'],
+        datasets: [{
+          data: [0, 100], // Will update on click
+          backgroundColor: ['#FF2E63', 'rgba(255,255,255,0.1)'],
+          borderWidth: 0,
+          cutout: '90%',
+        }]
+      },
+      options: {
+        responsive: true,
+        plugins: { legend: { display: false }, tooltip: { enabled: false } },
+        animation: { duration: 800 }
+      }
     });
   }
 
-  // Draw gauge
-  drawHunterGauge();
-}
+  // Update chart for initial selection
+  const selected = agents[selectedAlertId || 0];
+  if (selected && hunterGaugeChart) {
+    const sp = Math.round(selected.score * 100);
+    hunterGaugeChart.data.datasets[0].data = [sp, 100 - sp];
+    hunterGaugeChart.update();
+  }
 
-function drawHunterGauge() {
-  const canvas = document.getElementById('hunter-gauge');
-  if (!canvas) return;
-  const alert = aiAlerts.find(a => a.id === selectedAlertId) || aiAlerts[0];
-  const score = alert.score;
+  // Card click listeners
+  document.querySelectorAll('.hunter-alert-card').forEach(card => {
+    card.addEventListener('click', () => {
+      const idx = parseInt(card.dataset.liveIndex);
+      if (isNaN(idx)) return;
 
-  if (hunterGaugeChart) hunterGaugeChart.destroy();
-
-  hunterGaugeChart = new Chart(canvas, {
-    type: 'doughnut',
-    data: {
-      datasets: [{
-        data: [score, 100 - score],
-        backgroundColor: ['#FF2E63', 'rgba(255,255,255,0.05)'],
-        borderWidth: 0,
-      }]
-    },
-    options: {
-      cutout: '75%',
-      rotation: -135,
-      circumference: 270,
-      animation: { duration: 600 },
-      plugins: { legend: { display: false }, tooltip: { enabled: false } },
-    }
+      // Update state and re-render
+      selectedAlertId = idx;
+      renderTab('hunter');
+      // Re-init chart after render
+      setTimeout(initHunterTab, 50);
+    });
   });
 }
 
@@ -860,57 +836,73 @@ function drawHunterGauge() {
 // FLEET TAB
 // ============================================================
 function buildFleetTab() {
-  // Merge live agents into the agents array if available
-  if (liveState.agents.length > 0) {
-    agents.length = 0;
-    liveState.agents.forEach((a, i) => {
-      // Wazuh returns status as 'active'/'Active'/'disconnected' etc.
-      const st = (a.status || '').toLowerCase();
-      const status = st === 'active' ? 'healthy'
-        : st === 'disconnected' || st === 'never_connected' ? 'inactive'
-          : 'inactive';
-      agents.push({
-        id: i,
-        status,
-        name: a.name || `SRV-${String(i).padStart(2, '0')}`,
-        os: a.os?.name || a.os?.platform || '—',
-        version: a.os?.version || '',
-        ip: a.ip || '—',
-        lastSeen: a.lastKeepAlive || a.dateAdd || '—',
-        wazuhId: a.id || '—',
-        rawAgent: a,
-      });
-    });
+  const srcAgents = liveState.agents || [];
+
+  if (srcAgents.length === 0) {
+    return `
+      <div class="fleet-grid">
+        <div class="fleet-main">
+          <div class="glass-card fleet-hive-card" style="display:flex;align-items:center;justify-content:center;flex-direction:column;gap:16px">
+            <div style="font-size:48px;color:#00F0FF;opacity:0.3">${lucideIcon('server', 64)}</div>
+            <h2 style="color:#e0e0e0;margin:0">No Agents Connected</h2>
+            <p style="color:#606060;text-align:center;font-size:13px;max-width:320px">
+              Waiting for Wazuh agents to enroll. <br>
+              Ensure agents are pointing to the manager IP.
+            </p>
+          </div>
+        </div>
+        <div class="fleet-sidebar">
+          <div class="glass-card fleet-dist-card" id="fleet-dist-card">
+            <div class="fleet-dist-title">Fleet Distribution</div>
+            <div id="fleet-dist-content"><div class="fleet-dist-item"><div class="fleet-dist-row"><span class="fleet-dist-name">No Data</span></div></div></div>
+          </div>
+          <div class="glass-card fleet-maint-card">
+            <div class="fleet-maint-title">Maintenance Queue</div>
+            ${buildMaintenanceQueue()}
+          </div>
+        </div>
+      </div>`;
   }
-  // Original buildFleetTab body below:
-  const hexes = agents.map((agent, i) => {
+
+  const hexes = srcAgents.map((a, i) => {
+    // Wazuh returns status as 'active'/'Active'/'disconnected' etc.
+    const st = (a.status || '').toLowerCase();
+    const status = st === 'active' ? 'healthy'
+      : st === 'disconnected' || st === 'never_connected' ? 'inactive'
+        : 'inactive';
+
+    const name = a.name || `AGT-${String(i).padStart(2, '0')}`;
+    const os = a.os?.name || a.os?.platform || '—';
+
     const row = Math.floor(i / 7);
     const offset = row % 2 !== 0 ? 'margin-top:46px;margin-left:-4px;' : '';
+
+    // We attach the full agent object to the DOM element dataset or just use index
+    // For simplicity, we'll just pass index to showAgentModal and let it look up liveState.agents
     return `
       <div class="hex-wrap" style="${offset}">
-        <div class="hex ${agent.status}" title="${agent.name}" onclick="showAgentModal(${i})" style="cursor:pointer">
+        <div class="hex ${status}" title="${name}" onclick="showAgentModal(${i})" style="cursor:pointer">
           ${lucideIcon('activity', 12)}
-          <span class="hex-num">${agent.name.includes('-') ? agent.name.split('-').slice(1).join('-') : agent.name}</span>
+          <span class="hex-num">${name.length > 8 ? name.substring(0, 6) + '..' : name}</span>
         </div>
         <div class="hex-tooltip">
           <div class="hex-tooltip-header">
-            <span class="hex-tooltip-name">${agent.name}</span>
-            <span class="hex-tooltip-dot ${agent.status}"></span>
+            <span class="hex-tooltip-name">${name}</span>
+            <span class="hex-tooltip-dot ${status}"></span>
           </div>
           <div class="hex-tooltip-row">
             <span class="hex-tooltip-key">Status</span>
-            <span class="hex-tooltip-val">${agent.status}</span>
+            <span class="hex-tooltip-val">${status}</span>
           </div>
           <div class="hex-tooltip-row">
             <span class="hex-tooltip-key">OS</span>
-            <span class="hex-tooltip-val">${agent.os || '—'}</span>
+            <span class="hex-tooltip-val">${os}</span>
           </div>
         </div>
       </div>
     `;
   }).join('');
 
-  // Maintenance queue: real disconnected/threat agents, fall back to empty message
   const maintItems = buildMaintenanceQueue();
 
   return `
@@ -952,8 +944,6 @@ function buildFleetTab() {
       </div>
     </div>
   `;
-  // After DOM is painted, fill in the real fleet distribution
-  setTimeout(() => buildFleetDistribution(), 50);
 }
 
 // ── Anomaly Horizon Timeline (real per-minute buckets) ────────────────────────
@@ -1123,7 +1113,7 @@ function showAgentModal(agentIdx) {
   const existing = document.getElementById('agent-modal-overlay');
   if (existing) existing.remove();
 
-  const a = agents[agentIdx];
+  const a = liveState.agents[agentIdx];
   if (!a) return;
 
   // Alert count for this agent
@@ -1282,23 +1272,27 @@ async function askGemini(query) {
   const systemPrompt = `You are a concise SIEM analyst AI for SENTINEL. \nCurrent context:\n- Alerts: ${topAlerts}\n- AI risks: ${aiSummary}\n- Active agents: ${liveState.agents.length}\n\nUser query: \"${query}\"\n\nRespond with EXACTLY 4 investigation suggestions as a JSON array:\n[{\"title\":\"...\",\"category\":\"FORENSICS|THREAT HUNT|SECURITY|INVESTIGATE|AUDIT\",\"confidence\":85,\"detail\":\"one concise sentence\"}]\nKeep titles under 60 chars. No markdown, no extra text, just the JSON array.`;
 
   try {
-    // Key is injected server-side by nginx — DO NOT add ?key= here
-    const res = await fetch(API.GEMINI_URL, {
+    const res = await fetch('/openrouter-api/chat/completions', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        contents: [{ parts: [{ text: systemPrompt }] }],
-        generationConfig: { temperature: 0.4, maxOutputTokens: 400 },
+        model: 'google/gemini-2.0-flash-001',
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: query }
+        ],
+        temperature: 0.4,
+        max_tokens: 400
       }),
     });
-    if (!res.ok) throw new Error('Gemini API error');
+    if (!res.ok) throw new Error('OpenRouter API error');
     const d = await res.json();
-    const text = d.candidates?.[0]?.content?.parts?.[0]?.text || '[]';
+    const text = d.choices?.[0]?.message?.content || '[]';
     // Extract JSON array from response
     const match = text.match(/\[[\s\S]*\]/);
     return match ? JSON.parse(match[0]) : [];
   } catch (err) {
-    console.warn('Gemini error:', err);
+    console.warn('OpenRouter error:', err);
     return [];
   }
 }
@@ -1497,7 +1491,7 @@ async function sendChatMessage() {
     </div>`);
   scrollChatToBottom();
 
-  // Build SIEM system context (injected once as first turn if history is empty)
+  // Build SIEM system context
   const topAlerts = liveState.alerts.slice(0, 10).map(h => {
     const s = h._source || {};
     return `[L${s.rule?.level ?? 0}] ${s.rule?.description || '?'} — agent: ${s.agent?.name || 'mgr'}`;
@@ -1507,31 +1501,29 @@ async function sendChatMessage() {
   ).join(', ') || 'AI engine offline';
   const sysCtx = `You are SENTINEL AI, an expert SIEM security analyst assistant.\nYou have real-time access to the following live data from the SENTINEL SIEM platform:\n\nLIVE ALERTS (most recent 10):\n${topAlerts}\n\nAI RISK ANALYSIS:\n${aiSummary}\n\nACTIVE AGENTS: ${liveState.agents.length}\nGLOBAL RISK SCORE: ${liveState.aiRisks.global_risk != null ? (liveState.aiRisks.global_risk * 100).toFixed(1) + '/100' : 'unknown'}\n\nProvide concise, actionable security analysis. Use plain text with clear structure. Be direct and professional.`;
 
-  // Build conversation contents for the API
-  let contents = [];
+  // Build conversation history (Standard OpenAI format)
+  // If history is empty, prepend system context as system message
+  const messages = [];
   if (chatHistory.length === 0) {
-    // Inject system context as a model "seed" turn
-    contents.push({ role: 'user', parts: [{ text: sysCtx + '\n\nUser message: ' + text }] });
+    messages.push({ role: 'system', content: sysCtx });
   } else {
-    // On subsequent turns, just include history + new message
-    contents = [
-      ...chatHistory,
-      { role: 'user', parts: [{ text }] },
-    ];
+    // We don't resend the system context every turn to save tokens, or we can prepend it
+    // For robust context, let's prepend it as system message always
+    messages.push({ role: 'system', content: sysCtx });
+    // Append standard history
+    messages.push(...chatHistory);
   }
+  messages.push({ role: 'user', content: text });
 
   try {
-    const res = await fetch(API.GEMINI_URL, {
+    const res = await fetch('/openrouter-api/chat/completions', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        contents,
-        generationConfig: { temperature: 0.5, maxOutputTokens: 800 },
-        safetySettings: [
-          { category: 'HARM_CATEGORY_HARASSMENT', threshold: 'BLOCK_NONE' },
-          { category: 'HARM_CATEGORY_HATE_SPEECH', threshold: 'BLOCK_NONE' },
-          { category: 'HARM_CATEGORY_DANGEROUS_CONTENT', threshold: 'BLOCK_NONE' },
-        ],
+        model: 'google/gemini-2.0-flash-001',
+        messages: messages,
+        temperature: 0.5,
+        max_tokens: 800
       }),
     });
 
@@ -1544,16 +1536,13 @@ async function sendChatMessage() {
     }
 
     const data = await res.json();
-    const reply = data.candidates?.[0]?.content?.parts?.[0]?.text || '(No response — check AI proxy config)';
+    const reply = data.choices?.[0]?.message?.content || '(No response)';
 
-    // Update history (use original text for history, not the ctx-injected one)
-    if (chatHistory.length === 0) {
-      chatHistory.push({ role: 'user', parts: [{ text }] });
-    } else {
-      chatHistory.push({ role: 'user', parts: [{ text }] });
-    }
-    chatHistory.push({ role: 'model', parts: [{ text: reply }] });
-    // Keep history at most 20 turns to stay within token limits
+    // Update history
+    chatHistory.push({ role: 'user', content: text });
+    chatHistory.push({ role: 'assistant', content: reply }); // standard 'assistant' role
+
+    // Keep history at most 10 turns (20 messages)
     if (chatHistory.length > 20) chatHistory = chatHistory.slice(-20);
 
     msgs.insertAdjacentHTML('beforeend', `
@@ -1567,12 +1556,14 @@ async function sendChatMessage() {
     const typing = document.getElementById(typingId);
     if (typing) typing.remove();
     console.error('Chat error:', err);
+    const isProxy = err.message.includes('Failed to fetch') || err.message.includes('NetworkError');
     msgs.insertAdjacentHTML('beforeend', `
       <div style="margin-bottom:12px">
-        <div style="font-size:10px;color:#FF2E63;margin-bottom:4px;letter-spacing:1px">ERROR</div>
-        <div style="font-size:12px;color:#FF6B6B;line-height:1.6">
-          Neural link disrupted: ${escapeHtml(err.message)}<br>
-          <span style="color:#606060;font-size:10px">Check that docker is running and nginx proxy is configured.</span>
+        <div style="font-size:10px;color:#FF2E63;margin-bottom:4px;letter-spacing:1px">NEURAL LINK ERROR</div>
+        <div style="font-size:12px;color:#FF6B6B;line-height:1.7">
+          ${isProxy
+        ? 'Cannot reach the AI proxy. Run: <code style="background:rgba(255,255,255,0.06);padding:2px 6px;border-radius:4px;color:#00F0FF">docker compose down && docker compose up -d</code>'
+        : escapeHtml(err.message)}
         </div>
       </div>`);
   }
@@ -1746,18 +1737,27 @@ function exportLogsCSV() {
 // SHIELD TAB
 // ============================================================
 function buildShieldTab() {
-  const cveRows = cves.map(cve => `
+  // Use live vulnerability data if available, else empty state
+  const cveRows = (liveState.vulns.length > 0 ? liveState.vulns : []).map(cve => `
     <tr>
-      <td class="cve-id">${cve.id}</td>
-      <td class="cve-pkg">${cve.pkg}</td>
+      <td class="cve-id">${cve.cve}</td>
+      <td class="cve-pkg">${cve.package}</td>
       <td><span class="cve-severity-badge ${cve.severity.toLowerCase()}">${cve.severity}</span></td>
       <td class="cve-score">${cve.score}</td>
       <td class="cve-status">${cve.status}</td>
-      <td class="cve-action"><button class="cve-patch-btn">PATCH_ASSET</button></td>
+      <td class="cve-action"><button class="cve-patch-btn">INSPECT</button></td>
     </tr>
-  `).join('');
+  `).join('') || '<tr><td colspan="6" style="text-align:center;padding:20px;color:#606060">No vulnerabilities detected (or connect to Wazuh)</td></tr>';
 
-  const legendItems = vulnData.map(v => `
+  const stats = liveState.cveStats;
+  const legendData = [
+    { name: 'Critical', value: stats.critical, color: '#FF2E63' },
+    { name: 'High', value: stats.high, color: '#F97316' },
+    { name: 'Medium', value: stats.medium, color: '#EAB308' },
+    { name: 'Low', value: stats.low, color: '#00F0FF' },
+  ];
+
+  const legendItems = legendData.map(v => `
     <div class="shield-legend-item">
       <div class="shield-legend-dot" style="background:${v.color}"></div>
       <span class="shield-legend-label">${v.name}: ${v.value}</span>
@@ -1807,7 +1807,7 @@ function buildShieldTab() {
             </div>
             <div class="shield-reco-item">
               <div class="shield-reco-icon" style="color:#f97316">${lucideIcon('alert-triangle', 14)}</div>
-              <p class="shield-reco-text">Rotation of TLS certificates on <span class="highlight">K8S-LB</span> is 5 days overdue.</p>
+              <p class="shield-reco-text">Review open ports on <span class="highlight">K8S-LB</span>.</p>
             </div>
           </div>
         </div>
@@ -1849,10 +1849,9 @@ function initShieldTab() {
       else if (lvl >= 7) counts.Medium++;
       else counts.Low++;
     });
-    vulnData[0].value = counts.Critical > 0 ? counts.Critical : vulnData[0].value;
-    vulnData[1].value = counts.High > 0 ? counts.High : vulnData[1].value;
-    vulnData[2].value = counts.Medium > 0 ? counts.Medium : vulnData[2].value;
-    vulnData[3].value = counts.Low > 0 ? counts.Low : vulnData[3].value;
+    // --- Update CVE stats already fetched ---
+    // no-op here since liveState.cveStats is used directly in buildShieldTab()
+    // but we can update the posture scores:
 
     // Update CVE table with live alert descriptions
     const tbody = document.querySelector('.cve-table tbody');
@@ -1897,10 +1896,10 @@ function initShieldTab() {
   shieldChart = new Chart(canvas, {
     type: 'doughnut',
     data: {
-      labels: vulnData.map(v => v.name),
+      labels: ['Critical', 'High', 'Medium', 'Low'],
       datasets: [{
-        data: vulnData.map(v => v.value),
-        backgroundColor: vulnData.map(v => v.color),
+        data: [liveState.cveStats.critical, liveState.cveStats.high, liveState.cveStats.medium, liveState.cveStats.low],
+        backgroundColor: ['#FF2E63', '#F97316', '#EAB308', '#00F0FF'],
         borderWidth: 0,
         hoverOffset: 8,
       }]

@@ -92,7 +92,7 @@ services:
       - "80:80"
     environment:
       # Key is read from .env — envsubst injects it into nginx.conf.template at startup
-      - GEMINI_KEY=${GEMINI_KEY}
+      - GEMINI_KEY=${OPEN_ROUTER_KEY}
     volumes:
       - ./dashboard:/usr/share/nginx/html
       # nginx:alpine auto-runs envsubst on files in /etc/nginx/templates/ → /etc/nginx/conf.d/

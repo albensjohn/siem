@@ -31,7 +31,7 @@ PROCESS_GROUPS:     frozenset[str] = frozenset({"process_monitor", "ossec"})
 MIN_RULE_LEVEL = 5
 
 # Feature vector column order — MUST stay consistent for the model
-FEATURE_NAMES = ["failed_logins", "unique_ips", "sudo", "file_mods", "process"]
+FEATURE_NAMES = ["failed_logins", "unique_ips", "sudo", "file_mods", "process", "threats"]
 N_FEATURES    = len(FEATURE_NAMES)
 
 
@@ -95,6 +95,7 @@ def _parse_hit(hit: dict) -> dict | None:
             "agent":       agent_name,
             "rule_id":     rule_id,
             "rule_groups": rule_groups,
+            "rule_level":  int(rule.get("level") or 0),
             "src_ip":      src_ip,
             "full_log":    full_log,
         }
@@ -124,7 +125,7 @@ def _deduplicate(events: list[dict]) -> list[dict]:
 def _extract_features_for_agent(events: list[dict]) -> dict:
     """
     Given events for a single agent, return a feature dict.
-    All counts are non-negative integers.
+    Broader logic using rule groups and MITRE data.
     """
     failed_logins = 0
     source_ips: set[str] = set()
@@ -132,23 +133,34 @@ def _extract_features_for_agent(events: list[dict]) -> dict:
     sudo_events = 0
     file_mods   = 0
     processes   = 0
+    threats     = 0
 
     for e in events:
-        rid     = e["rule_id"]
-        rgroups = e["rule_groups"]
-        sip     = e["src_ip"]
-
-        if rid in FAILED_LOGIN_RULES:
+        rid     = e.get("rule_id", 0)
+        # Groups is a frozenset, but let's be safe
+        rgroups = e.get("rule_groups", frozenset())
+        sip     = e.get("src_ip")
+        
+        # Check rule groups for broader categorization
+        if "authentication_failed" in rgroups or "login_denied" in rgroups or "authentication_failures" in rgroups:
             failed_logins += 1
-        if sip:
+            
+        if sip and sip != "-" and sip != "0.0.0.0":
             source_ips.add(sip)
             ip_counts[sip] = ip_counts.get(sip, 0) + 1
-        if rid in SUDO_RULES:
+
+        if "sudo" in rgroups or "pam" in rgroups:
             sudo_events += 1
-        if rgroups & SYSCHECK_GROUPS:
+
+        if "syscheck" in rgroups or "fim" in rgroups:
             file_mods += 1
-        if rgroups & PROCESS_GROUPS:
+
+        if "process_monitor" in rgroups or "ossec" in rgroups:
             processes += 1
+            
+        # Generic threat counter (high level or specific attack groups)
+        if "attack" in rgroups or "exploit" in rgroups or e.get("rule_level", 0) >= 10:
+            threats += 1
 
     top_ip = max(ip_counts, key=ip_counts.get) if ip_counts else None
 
@@ -158,6 +170,7 @@ def _extract_features_for_agent(events: list[dict]) -> dict:
         "sudo":           sudo_events,
         "file_mods":      file_mods,
         "process":        processes,
+        "threats":        threats,
         "top_source_ip":  top_ip,
     }
 
