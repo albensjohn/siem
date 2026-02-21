@@ -122,9 +122,14 @@ async function apiFetchAlerts() {
 async function apiFetchAiRisks() {
   try {
     const res = await fetch(API.AI_DATA);
-    if (!res.ok) return;
+    if (!res.ok) {
+      console.warn('AI Engine data fetch failed:', res.status);
+      return;
+    }
     liveState.aiRisks = await res.json();
-  } catch (e) { /* ai engine not ready */ }
+  } catch (e) {
+    console.warn('AI Engine not ready or network error:', e);
+  }
 }
 
 async function apiFetchVulnerabilities() {
@@ -196,15 +201,20 @@ function updateFooterStatus() {
   if (!footer) return;
   const mgrOnline = !!liveState.mgrToken;
   const idxOnline = liveState.alerts.length > 0;
-  const aiOnline = Array.isArray(liveState.aiRisks.agents) && liveState.aiRisks.agents.length > 0;
+
+  // FIX: Check status field, not just agents array
+  const aiStatus = liveState.aiRisks.status;
+  const aiOnline = aiStatus === 'OK' || aiStatus === 'LEARNING' || aiStatus === 'DEGRADED';
+
   const mgrDot = mgrOnline ? '<span class="footer-dot"></span>' : '<span class="footer-dot" style="background:#FF2E63"></span>';
   const idxDot = idxOnline ? '<span class="footer-dot"></span>' : '<span class="footer-dot" style="background:#FF2E63"></span>';
   const aiDot = aiOnline ? '<span class="footer-dot cyan"></span>' : '<span class="footer-dot" style="background:#f97316"></span>';
+
   footer.innerHTML = `
     <div class="footer-left">
       <div class="footer-item">${mgrDot}<span>MGR_API: ${mgrOnline ? 'ONLINE' : 'OFFLINE'}</span></div>
       <div class="footer-item">${idxDot}<span>INDEXER: ${idxOnline ? 'STREAMING' : 'OFFLINE'}</span></div>
-      <div class="footer-item">${aiDot}<span>AI_ENGINE: ${(() => { const s = liveState.aiRisks.status; return s === 'OK' ? 'v2.4.1_STABLE' : s === 'LEARNING' ? 'LEARNING…' : s === 'DEGRADED' ? 'DEGRADED' : 'OFFLINE'; })()}</span></div>
+      <div class="footer-item">${aiDot}<span>AI_ENGINE: ${aiStatus || 'OFFLINE'}</span></div>
     </div>
     <div class="footer-right">
       <span>AGENTS: ${liveState.agents.length || '—'}</span>
@@ -230,15 +240,12 @@ function runBootLoader() {
   const progressBar = document.getElementById('boot-progress-bar');
   const progressPct = document.getElementById('boot-progress-pct');
 
+  // CLEANUP: Professional boot sequence, less "hacker" style
   const bootLogs = [
-    'INITIALIZING SENTINEL OS v4.0.2...',
-    'LOADING KERNEL MODULES...',
-    'ESTABLISHING SECURE TUNNEL [AES-256]...',
-    'MOUNTING K8S_PRIMARY CLUSTER...',
-    'SYNCING THREAT INTELLIGENCE FEEDS...',
-    'INITIALIZING AI FORENSIC ENGINE...',
-    'VERIFYING LEVEL 4 CLEARANCE...',
-    'SYSTEM READY.',
+    'Initializing System Modules...',
+    'Loading Security Configuration...',
+    'Connecting to Data Sources...',
+    'System Ready.'
   ];
 
   let idx = 0;
@@ -246,14 +253,14 @@ function runBootLoader() {
     if (idx < bootLogs.length) {
       const p = document.createElement('p');
       p.className = 'boot-log-line';
-      p.innerHTML = `<span class="prompt">[&gt;]</span> ${bootLogs[idx]}`;
+      p.innerHTML = `<span class="prompt">></span> ${bootLogs[idx]}`;
       logBox.appendChild(p);
       logBox.scrollTop = logBox.scrollHeight;
       idx++;
       const pct = Math.min(Math.round((idx / bootLogs.length) * 100), 100);
       progressBar.style.width = pct + '%';
       progressPct.textContent = pct + '%';
-      setTimeout(step, 320);
+      setTimeout(step, 400); // Slower, more deliberate pace
     } else {
       setTimeout(() => {
         bootEl.classList.add('fade-out');
@@ -261,7 +268,7 @@ function runBootLoader() {
           bootEl.classList.add('hidden');
           initApp();
         }, 500);
-      }, 400);
+      }, 500);
     }
   };
   setTimeout(step, 200);
@@ -342,7 +349,7 @@ function setActiveTab(tab) {
   // Update page title
   const titleEl = document.getElementById('page-title');
   if (titleEl) {
-    titleEl.innerHTML = `${tab} <span>// OPERATIONAL_INTEL</span>`;
+    titleEl.innerHTML = `${tab}`;
   }
 
   // Animate tab content out then in
@@ -506,19 +513,20 @@ function buildNexusTab() {
               <span class="ping-dot-label">Active Nodes</span>
             </div>
           </div>
-          <div class="nexus-map-body">
+    <div class="nexus-map-body">
             <svg class="world" viewBox="0 0 1000 500">
               <path d="M150,150 L200,100 L300,120 L350,200 L300,300 L200,350 L100,300 Z M600,100 L700,80 L800,120 L850,250 L800,400 L700,450 L600,400 L550,250 Z M400,300 L450,250 L500,300 L450,350 Z"/>
               <circle cx="250" cy="220" r="100"/>
               <circle cx="700" cy="250" r="120"/>
               <circle cx="450" cy="400" r="60"/>
             </svg>
-            ${arcs}
+            
+            <!-- Simplified Map Markers (Static) -->
             <div class="map-pulse-point cyan" style="top:30%;left:25%">
-              <div class="dot"></div><div class="ring"></div>
+              <div class="dot"></div>
             </div>
             <div class="map-pulse-point crimson" style="top:45%;left:65%">
-              <div class="dot"></div><div class="ring"></div>
+              <div class="dot"></div>
             </div>
             <div class="map-pulse-point cyan" style="top:20%;left:75%">
               <div class="dot"></div>
@@ -526,12 +534,13 @@ function buildNexusTab() {
             <div class="map-pulse-point purple" style="top:60%;left:40%">
               <div class="dot" style="width:6px;height:6px"></div>
             </div>
+            
             <div class="map-overlay-bl" id="map-stats-overlay">
-              <p>AGENTS: <span style="color:#00F0FF">${liveState.agents.length || '—'}</span></p>
-              <p>ALERTS (24H): <span style="color:#FF2E63">${liveState.alerts.length || '—'}</span></p>
+              <p>AGENTS: <span style="color:#00F0FF">${liveState.agents.length || '0'}</span></p>
+              <p>ALERTS (24H): <span style="color:#FF2E63">${liveState.alerts.length || '0'}</span></p>
             </div>
             <div class="map-overlay-tr" id="map-threat-overlay" style="color:${liveState.alerts.some(h => (h._source?.rule?.level ?? 0) >= 13) ? '#FF2E63' : '#00F0FF'}">
-              ${liveState.alerts.some(h => (h._source?.rule?.level ?? 0) >= 13) ? '[!] CRITICAL THREATS ACTIVE' : '[ ] ALL SYSTEMS NOMINAL'}
+              ${liveState.alerts.some(h => (h._source?.rule?.level ?? 0) >= 13) ? 'CRITICAL THREATS ACTIVE' : 'ALL SYSTEMS NOMINAL'}
             </div>
           </div>
         </div>
@@ -671,13 +680,20 @@ function buildHunterTab() {
   const status = liveState.aiRisks.status || 'OFFLINE';
 
   if (agents.length === 0) {
+    // FIX: Show correct status even if no agents are flagged
+    const isOnline = status === 'OK' || status === 'LEARNING';
+    const color = isOnline ? '#00F0FF' : '#606060';
+    const iconColor = isOnline ? '#00F0FF' : '#606060';
+    const message = isOnline
+      ? "AI Engine is active and monitoring event streams.<br>No anomalies detected at this time."
+      : "The AI Engine service appears to be offline.<br>Check container status.";
+
     return `
-      <div style="display:flex;flex-direction:column;align-items:center;justify-content:center;height:100%;color:#606060;text-align:center">
-        <div style="font-size:48px;margin-bottom:20px;color:#00F0FF;opacity:0.5">${lucideIcon('brain', 64)}</div>
-        <h2 style="color:#e0e0e0;margin-bottom:8px">AI Engine Status: <span style="color:#00F0FF">${status}</span></h2>
-        <p style="max-width:400px;line-height:1.6">
-          The Isolation Forest model is analyzing event streams. <br>
-          Alerts will appear here when anomalies effectively deviate from the baseline.
+      <div style="display:flex;flex-direction:column;align-items:center;justify-content:center;height:100%;color:#a0a0a0;text-align:center">
+        <div style="font-size:48px;margin-bottom:20px;color:${iconColor};opacity:0.8">${lucideIcon('brain', 64)}</div>
+        <h2 style="color:#fff;margin-bottom:8px">AI Engine Status: <span style="color:${color}">${status}</span></h2>
+        <p style="max-width:400px;line-height:1.6;color:#808080">
+          ${message}
         </p>
       </div>`;
   }
@@ -1008,10 +1024,10 @@ function buildMaintenanceQueue() {
 function handleLogout() {
   if (!confirm('Log out of SENTINEL SIEM?')) return;
   document.body.innerHTML = `
-    <div style="display:flex;flex-direction:column;align-items:center;justify-content:center;height:100vh;background:#06060a;color:#fff;font-family:'Courier New',monospace;gap:16px">
-      <div style="font-size:32px;color:#00F0FF;font-weight:700;letter-spacing:4px">SENTINEL</div>
-      <div style="color:#A0A0A0;font-size:13px">Session terminated.</div>
-      <button onclick="location.reload()" style="margin-top:16px;padding:10px 28px;background:rgba(0,240,255,0.1);border:1px solid rgba(0,240,255,0.4);border-radius:6px;color:#00F0FF;cursor:pointer;font-size:12px;letter-spacing:2px">RECONNECT</button>
+    <div style="display:flex;flex-direction:column;align-items:center;justify-content:center;height:100vh;background:#06060a;color:#fff;font-family:sans-serif;gap:16px">
+      <div style="font-size:24px;font-weight:600">SENTINEL SIEM</div>
+      <div style="color:#A0A0A0;font-size:14px">You have been logged out.</div>
+      <button onclick="location.reload()" style="margin-top:16px;padding:10px 24px;background:#00F0FF;border:none;border-radius:6px;color:#000;font-weight:600;cursor:pointer">Log In</button>
     </div>`;
 }
 
