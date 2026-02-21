@@ -8,7 +8,7 @@
 // ============================================================
 // DATA
 // ============================================================
-const recentLogs = []; // Will use liveState.alerts
+
 const aiAlerts = []; // Will use liveState.aiRisks
 const agents = []; // Will use liveState.agents
 const vulnData = []; // Will use new liveState.vulns
@@ -484,19 +484,6 @@ function buildNexusTab() {
     return `<div class="map-arc" style="left:${left}%;top:${top}%;transform:rotate(${rot}deg);animation-delay:${delay}s"></div>`;
   }).join('');
 
-  const activityRows = recentLogs.map((log, idx) => `
-    <div class="activity-row">
-      <div class="activity-severity ${log.severity}"></div>
-      <div style="flex:1">
-        <div class="activity-msg">${log.msg}</div>
-        <div class="activity-meta">
-          <span>Source: ${log.source}</span>
-          <span>Time: ${log.time}</span>
-        </div>
-      </div>
-      <button class="activity-inspect" onclick="showAlertDetail(null,${idx})">INSPECT</button>
-    </div>
-  `).join('');
 
   return `
     <div class="space-y-6">
@@ -605,7 +592,6 @@ function buildNexusTab() {
           <h3>Recent Activity Stream</h3>
           <button class="activity-export" id="export-btn" onclick="exportLogsCSV()">EXPORT LOGS.CSV</button>
         </div>
-        ${activityRows}
       </div>
     </div>
   `;
@@ -1082,14 +1068,7 @@ function showAlertDetail(e, mockIdx, btn) {
   if (existing) { existing.remove(); return; }
 
   let data = {};
-  if (mockIdx >= 0 && recentLogs[mockIdx]) {
-    const log = recentLogs[mockIdx];
-    data = {
-      msg: log.msg, agent: log.source, time: log.time,
-      level: log.severity === 'critical' ? 13 : log.severity === 'warning' ? 7 : 3,
-      ruleId: '—', srcip: '—'
-    };
-  } else if (btn) {
+  if (btn) {
     const allBtns = [...document.querySelectorAll('.activity-inspect')];
     const idx = allBtns.indexOf(btn);
     const hit = liveState.alerts[idx] || liveState.alerts[0];
