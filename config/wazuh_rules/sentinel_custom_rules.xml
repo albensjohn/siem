@@ -1,0 +1,384 @@
+<!-- ============================================================
+     SENTINEL SIEM — Custom Detection Rules
+     File: /var/ossec/etc/rules/sentinel_custom_rules.xml
+     
+     Mounted from host: config/wazuh_rules/sentinel_custom_rules.xml
+     This file persists across container restarts via docker volume mount.
+     
+     Rule IDs: 100001–100030  (safe range for custom rules)
+     ============================================================ -->
+
+<group name="sentinel,">
+
+  <!-- ============================================================
+       SSH / AUTHENTICATION ATTACKS
+       ============================================================ -->
+
+  <!-- SSH Brute-Force: 5+ failures from same IP in 60 seconds -->
+  <rule id="100001" level="10" frequency="5" timeframe="60">
+    <if_matched_sid>5716</if_matched_sid>
+    <same_source_ip />
+    <description>SSH brute-force attack: multiple authentication failures from same IP</description>
+    <group>authentication_failures,brute_force,attack,</group>
+    <mitre>
+      <id>T1110.001</id>
+    </mitre>
+  </rule>
+
+  <!-- SSH success AFTER repeated failures — credential stuffing -->
+  <rule id="100002" level="12">
+    <if_matched_sid>100001</if_matched_sid>
+    <if_sid>5715</if_sid>
+    <same_source_ip />
+    <description>SSH login succeeded after brute-force: possible credential stuffing</description>
+    <group>authentication_success,brute_force,attack,</group>
+    <mitre>
+      <id>T1110.004</id>
+    </mitre>
+  </rule>
+
+  <!-- Root SSH login — always suspicious -->
+  <rule id="100003" level="13">
+    <if_sid>5715</if_sid>
+    <user>root</user>
+    <description>Direct root SSH login detected — policy violation</description>
+    <group>authentication_success,pci_dss_2.2.4,gpg13_7.2,gdpr_IV_35.7.d,hipaa_164.312.b,</group>
+    <mitre>
+      <id>T1078.003</id>
+    </mitre>
+  </rule>
+
+  <!-- Invalid user SSH attempt -->
+  <rule id="100004" level="8" frequency="3" timeframe="30">
+    <if_matched_sid>5710</if_matched_sid>
+    <same_source_ip />
+    <description>Multiple SSH login attempts with invalid usernames from same IP</description>
+    <group>authentication_failed,brute_force,</group>
+    <mitre>
+      <id>T1110.003</id>
+    </mitre>
+  </rule>
+
+  <!-- PAM auth failure (covers non-SSH local auth) -->
+  <rule id="100005" level="8" frequency="5" timeframe="60">
+    <if_matched_sid>5503</if_matched_sid>
+    <same_source_ip />
+    <description>PAM: repeated authentication failures — possible local brute-force</description>
+    <group>authentication_failures,brute_force,</group>
+    <mitre>
+      <id>T1110</id>
+    </mitre>
+  </rule>
+
+
+  <!-- ============================================================
+       PRIVILEGE ESCALATION
+       ============================================================ -->
+
+  <!-- Sudo command execution -->
+  <rule id="100010" level="9">
+    <if_sid>5401</if_sid>
+    <description>User executed command via sudo — privilege escalation event</description>
+    <group>sudo,privilege_escalation,</group>
+    <mitre>
+      <id>T1548.003</id>
+    </mitre>
+  </rule>
+
+  <!-- Sudo authentication failure -->
+  <rule id="100011" level="10" frequency="3" timeframe="60">
+    <if_matched_sid>5402</if_matched_sid>
+    <description>Repeated sudo authentication failures — possible privilege escalation attempt</description>
+    <group>sudo,authentication_failures,privilege_escalation,attack,</group>
+    <mitre>
+      <id>T1548.003</id>
+    </mitre>
+  </rule>
+
+  <!-- New user created -->
+  <rule id="100012" level="9">
+    <if_sid>5902</if_sid>
+    <description>New user account created on system</description>
+    <group>adduser,persistence,</group>
+    <mitre>
+      <id>T1136.001</id>
+    </mitre>
+  </rule>
+
+  <!-- User added to privileged group (sudo/wheel/admin) -->
+  <rule id="100013" level="11">
+    <if_sid>5905</if_sid>
+    <match>sudo|wheel|admin|root</match>
+    <description>User added to privileged group — potential unauthorized escalation</description>
+    <group>privilege_escalation,attack,</group>
+    <mitre>
+      <id>T1078.003</id>
+    </mitre>
+  </rule>
+
+
+  <!-- ============================================================
+       PERSISTENCE MECHANISMS
+       ============================================================ -->
+
+  <!-- Crontab modification -->
+  <rule id="100020" level="10">
+    <if_group>syscheck</if_group>
+    <match>/etc/cron|/var/spool/cron|/etc/crontab</match>
+    <description>Cron job modified — possible persistence mechanism</description>
+    <group>syscheck,persistence,</group>
+    <mitre>
+      <id>T1053.005</id>
+    </mitre>
+  </rule>
+
+  <!-- SSH authorized_keys modified -->
+  <rule id="100021" level="10">
+    <if_group>syscheck</if_group>
+    <match>authorized_keys</match>
+    <description>SSH authorized_keys modified — possible backdoor installation</description>
+    <group>syscheck,persistence,attack,</group>
+    <mitre>
+      <id>T1098.004</id>
+    </mitre>
+  </rule>
+
+  <!-- Systemd service file created/modified -->
+  <rule id="100022" level="9">
+    <if_group>syscheck</if_group>
+    <match>/etc/systemd|/lib/systemd|/usr/lib/systemd</match>
+    <description>Systemd service file modified — possible persistence via service</description>
+    <group>syscheck,persistence,</group>
+    <mitre>
+      <id>T1543.002</id>
+    </mitre>
+  </rule>
+
+  <!-- Bashrc/profile modification (shell persistence) -->
+  <rule id="100023" level="9">
+    <if_group>syscheck</if_group>
+    <match>.bashrc|.bash_profile|.profile|/etc/profile</match>
+    <description>Shell startup file modified — possible persistence via shell init</description>
+    <group>syscheck,persistence,</group>
+    <mitre>
+      <id>T1546.004</id>
+    </mitre>
+  </rule>
+
+
+  <!-- ============================================================
+       WEB APPLICATION ATTACKS
+       ============================================================ -->
+
+  <!-- SQL Injection patterns in web logs -->
+  <rule id="100030" level="10">
+    <if_sid>31103</if_sid>
+    <url>select|union|insert|update|delete|drop|exec|xp_|;--|'--</url>
+    <description>Web attack: SQL injection attempt detected</description>
+    <group>web,attack,sql_injection,</group>
+    <mitre>
+      <id>T1190</id>
+    </mitre>
+  </rule>
+
+  <!-- XSS patterns in web logs -->
+  <rule id="100031" level="9">
+    <if_sid>31103</if_sid>
+    <url>&lt;script|javascript:|onerror=|onload=|alert(|document.cookie</url>
+    <description>Web attack: Cross-site scripting (XSS) attempt detected</description>
+    <group>web,attack,xss,</group>
+    <mitre>
+      <id>T1059.007</id>
+    </mitre>
+  </rule>
+
+  <!-- Path traversal / LFI -->
+  <rule id="100032" level="10">
+    <if_sid>31103</if_sid>
+    <url>../|..\|/etc/passwd|/etc/shadow|/proc/self|/var/log</url>
+    <description>Web attack: Directory traversal / LFI attempt detected</description>
+    <group>web,attack,</group>
+    <mitre>
+      <id>T1083</id>
+    </mitre>
+  </rule>
+
+  <!-- Web scanner / high request rate (40xx errors) -->
+  <rule id="100033" level="8" frequency="20" timeframe="60">
+    <if_matched_sid>31106</if_matched_sid>
+    <same_source_ip />
+    <description>Web scanner detected: high rate of 4xx errors from single IP</description>
+    <group>web,recon,brute_force,</group>
+    <mitre>
+      <id>T1595.002</id>
+    </mitre>
+  </rule>
+
+  <!-- Command injection in web request -->
+  <rule id="100034" level="12">
+    <if_sid>31103</if_sid>
+    <url>cmd=|exec(|system(|passthru(|shell_exec(|%60|wget |curl </url>
+    <description>Web attack: Command injection attempt detected</description>
+    <group>web,attack,command_injection,</group>
+    <mitre>
+      <id>T1059</id>
+    </mitre>
+  </rule>
+
+
+  <!-- ============================================================
+       SENSITIVE FILE ACCESS (FIM)
+       ============================================================ -->
+
+  <!-- /etc/shadow read — credential access -->
+  <rule id="100040" level="11">
+    <if_group>syscheck</if_group>
+    <match>/etc/shadow|/etc/gshadow</match>
+    <description>Sensitive file accessed: /etc/shadow — possible credential harvesting</description>
+    <group>syscheck,credential_access,attack,</group>
+    <mitre>
+      <id>T1003.008</id>
+    </mitre>
+  </rule>
+
+  <!-- Sudoers file modified -->
+  <rule id="100041" level="12">
+    <if_group>syscheck</if_group>
+    <match>/etc/sudoers</match>
+    <description>Sudoers file modified — privilege escalation persistence risk</description>
+    <group>syscheck,persistence,privilege_escalation,attack,</group>
+    <mitre>
+      <id>T1548.003</id>
+    </mitre>
+  </rule>
+
+  <!-- Binary in /tmp or /dev/shm (malware staging) -->
+  <rule id="100042" level="11">
+    <if_group>syscheck</if_group>
+    <match>/tmp/|/dev/shm/|/var/tmp/</match>
+    <description>Executable file created in temp directory — possible malware staging</description>
+    <group>syscheck,malware,attack,</group>
+    <mitre>
+      <id>T1036.005</id>
+    </mitre>
+  </rule>
+
+
+  <!-- ============================================================
+       LATERAL MOVEMENT & RECON
+       ============================================================ -->
+
+  <!-- Network scan from inside (many connection attempts) -->
+  <rule id="100050" level="10">
+    <if_sid>1002</if_sid>
+    <match>nmap|masscan|netdiscover|arp-scan</match>
+    <description>Network scanner tool executed — lateral movement / recon activity</description>
+    <group>recon,lateral_movement,attack,</group>
+    <mitre>
+      <id>T1046</id>
+    </mitre>
+  </rule>
+
+  <!-- SSH tunnel / port forwarding -->
+  <rule id="100051" level="10">
+    <if_sid>5715</if_sid>
+    <match>-L |^-R |^-D |tunnel|forward</match>
+    <description>SSH tunneling/port-forwarding detected — possible lateral movement</description>
+    <group>lateral_movement,</group>
+    <mitre>
+      <id>T1572</id>
+    </mitre>
+  </rule>
+
+
+  <!-- ============================================================
+       FIREWALL & NETWORK ANOMALIES
+       ============================================================ -->
+
+  <!-- Firewall rule modified -->
+  <rule id="100060" level="11">
+    <if_sid>4004</if_sid>
+    <match>iptables|ufw|firewall-cmd|nftables</match>
+    <description>Firewall rule modified — defense evasion risk</description>
+    <group>firewall,defense_evasion,attack,</group>
+    <mitre>
+      <id>T1562.004</id>
+    </mitre>
+  </rule>
+
+  <!-- UFW/iptables blocked traffic spike -->
+  <rule id="100061" level="8" frequency="15" timeframe="60">
+    <if_matched_sid>4002</if_matched_sid>
+    <same_source_ip />
+    <description>High rate of firewall-blocked packets from single source — port scan or DDoS</description>
+    <group>firewall,recon,attack,</group>
+    <mitre>
+      <id>T1595</id>
+    </mitre>
+  </rule>
+
+
+  <!-- ============================================================
+       PROCESS & EXECUTION ANOMALIES
+       ============================================================ -->
+
+  <!-- Unexpected script interpreter spawned -->
+  <rule id="100070" level="9">
+    <if_sid>5501</if_sid>
+    <match>python|perl|ruby|php|nc |netcat|bash -i|sh -i</match>
+    <description>Suspicious interpreter or reverse shell command executed</description>
+    <group>process_monitor,execution,attack,</group>
+    <mitre>
+      <id>T1059</id>
+    </mitre>
+  </rule>
+
+  <!-- Base64 encoded command execution (obfuscation) -->
+  <rule id="100071" level="10">
+    <if_sid>5501</if_sid>
+    <match>base64 -d|base64 --decode|echo.*|base64</match>
+    <description>Base64-encoded command execution detected — possible obfuscation</description>
+    <group>process_monitor,defense_evasion,attack,</group>
+    <mitre>
+      <id>T1027</id>
+    </mitre>
+  </rule>
+
+  <!-- Downloading tools (wget/curl to execute) -->
+  <rule id="100072" level="10">
+    <if_sid>5501</if_sid>
+    <match>wget |curl.*-o|curl.*http|pip install|apt-get install|yum install</match>
+    <description>File download / package install via command line — possible tool staging</description>
+    <group>process_monitor,ingress_tool_transfer,</group>
+    <mitre>
+      <id>T1105</id>
+    </mitre>
+  </rule>
+
+
+  <!-- ============================================================
+       MULTIPLE FAILURES CORRELATION
+       ============================================================ -->
+
+  <!-- Multiple different attack types from same IP -->
+  <rule id="100080" level="13" frequency="3" timeframe="300">
+    <if_matched_group>attack</if_matched_group>
+    <same_source_ip />
+    <description>SENTINEL: Multiple attack types from same source IP — active threat actor</description>
+    <group>correlation,attack,brute_force,</group>
+    <mitre>
+      <id>T1078</id>
+    </mitre>
+  </rule>
+
+  <!-- Multiple agent alerts spike — coordinated attack -->
+  <rule id="100081" level="12" frequency="10" timeframe="120">
+    <if_matched_group>attack</if_matched_group>
+    <description>SENTINEL: Attack spike — high volume of attack events detected across agents</description>
+    <group>correlation,attack,</group>
+    <mitre>
+      <id>T1498</id>
+    </mitre>
+  </rule>
+
+</group>

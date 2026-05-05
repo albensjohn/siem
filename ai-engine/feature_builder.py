@@ -6,11 +6,16 @@ Stage 1 of the AI Engine pipeline.
 Responsibilities:
   1. Noise Reduction : drop rule.level < 5, deduplicate identical alerts
   2. Feature Extraction per agent over a sliding 5-minute window:
-       failed_logins      – authentication failure rule IDs
-       unique_source_ips  – distinct source IPs observed
-       sudo_events        – privilege escalation rule IDs
-       file_modifications – syscheck (FIM) group events
-       process_creations  – process_monitor group events
+       failed_logins      – authentication failure / invalid user events
+       brute_force        – rapid repeated failures (frequency rules 100001, 100004)
+       unique_ips         – distinct source IPs observed
+       sudo               – privilege escalation rule groups + rule IDs 100010-100011
+       file_mods          – syscheck (FIM) group events
+       web_attacks        – SQLi, XSS, LFI, CMDi (rules 100030-100034)
+       lateral            – recon, port-scan, tunnel (rules 100050-100051)
+       persistence        – cron/SSH-key/service/shell-init mods (rules 100020-100023)
+       process            – process_monitor / execution anomalies (rules 100070-100072)
+       threats            – any event with rule.level >= 10
 
 Returns a list of dicts ready for the Isolation Forest model.
 """
@@ -23,16 +28,41 @@ from datetime import datetime, timezone, timedelta
 logger = logging.getLogger(__name__)
 
 # ── Rule ID sets ──────────────────────────────────────────────────────────────
-FAILED_LOGIN_RULES: frozenset[int] = frozenset({5710, 5711, 5712, 5713, 18152})
-SUDO_RULES:         frozenset[int] = frozenset({5401, 5402, 5403})
-SYSCHECK_GROUPS:    frozenset[str] = frozenset({"syscheck"})
-PROCESS_GROUPS:     frozenset[str] = frozenset({"process_monitor", "ossec"})
+# Default Wazuh SSH rules
+SSH_FAILURE_RULES: frozenset[int] = frozenset({5710, 5711, 5712, 5713, 5716, 18152})
+# Custom SENTINEL brute-force correlation rules
+BRUTE_FORCE_RULES: frozenset[int] = frozenset({100001, 100002, 100004, 100005, 100080, 100081})
+# Custom SENTINEL web attack rules
+WEB_ATTACK_RULES:  frozenset[int] = frozenset({100030, 100031, 100032, 100033, 100034})
+# Custom SENTINEL privilege escalation rules
+SUDO_RULES:        frozenset[int] = frozenset({5401, 5402, 5403, 100010, 100011, 100012, 100013})
+# Custom SENTINEL persistence rules
+PERSIST_RULES:     frozenset[int] = frozenset({100020, 100021, 100022, 100023, 100041})
+# Custom SENTINEL lateral movement / recon rules
+LATERAL_RULES:     frozenset[int] = frozenset({100050, 100051, 100060, 100061})
+# Syscheck / FIM groups
+SYSCHECK_GROUPS:   frozenset[str] = frozenset({"syscheck", "fim"})
+# Process monitor groups
+PROCESS_GROUPS:    frozenset[str] = frozenset({"process_monitor", "execution"})
 
 MIN_RULE_LEVEL = 5
 
 # Feature vector column order — MUST stay consistent for the model
-FEATURE_NAMES = ["failed_logins", "unique_ips", "sudo", "file_mods", "process", "threats"]
-N_FEATURES    = len(FEATURE_NAMES)
+# NOTE: Adding new features here requires wiping /shared_data/model.pkl
+#       so the model is retrained on the new shape.
+FEATURE_NAMES = [
+    "failed_logins",   # SSH/PAM auth failures
+    "brute_force",     # Frequency-based brute-force correlation
+    "unique_ips",      # Distinct source IPs
+    "sudo",            # Privilege escalation events
+    "file_mods",       # FIM / syscheck changes
+    "web_attacks",     # SQLi, XSS, LFI, CMDi
+    "lateral",         # Recon, port-scan, tunneling, firewall mod
+    "persistence",     # Cron/SSH-key/service/shell-init persistence
+    "process",         # Suspicious process / execution events
+    "threats",         # Any high-level (>=10) event
+]
+N_FEATURES = len(FEATURE_NAMES)
 
 
 # ── Query builder ─────────────────────────────────────────────────────────────
@@ -124,54 +154,118 @@ def _deduplicate(events: list[dict]) -> list[dict]:
 
 def _extract_features_for_agent(events: list[dict]) -> dict:
     """
-    Given events for a single agent, return a feature dict.
-    Broader logic using rule groups and MITRE data.
+    Given events for a single agent, return a 10-dimensional feature dict
+    aligned with FEATURE_NAMES.
+
+    Each counter maps to one detected attack category:
+      failed_logins  → SSH/PAM auth failure events
+      brute_force    → Wazuh frequency-rule brute-force correlations (100001, 100004)
+      unique_ips     → Distinct source IPs (breadth of origin)
+      sudo           → sudo / privilege escalation events
+      file_mods      → FIM / syscheck file change events
+      web_attacks    → Web attack rule hits (SQLi, XSS, LFI, CMDi)
+      lateral        → Recon / lateral movement rule hits
+      persistence    → Persistence mechanism rule hits
+      process        → Suspicious process / execution events
+      threats        → Any event with rule.level >= 10 (catch-all high severity)
     """
     failed_logins = 0
+    brute_force   = 0
+    sudo_events   = 0
+    file_mods     = 0
+    web_attacks   = 0
+    lateral       = 0
+    persistence   = 0
+    processes     = 0
+    threats       = 0
+
     source_ips: set[str] = set()
     ip_counts:  dict[str, int] = {}
-    sudo_events = 0
-    file_mods   = 0
-    processes   = 0
-    threats     = 0
 
     for e in events:
         rid     = e.get("rule_id", 0)
-        # Groups is a frozenset, but let's be safe
         rgroups = e.get("rule_groups", frozenset())
-        sip     = e.get("src_ip")
-        
-        # Check rule groups for broader categorization
-        if "authentication_failed" in rgroups or "login_denied" in rgroups or "authentication_failures" in rgroups:
-            failed_logins += 1
-            
-        if sip and sip != "-" and sip != "0.0.0.0":
+        level   = e.get("rule_level", 0)
+        sip     = e.get("src_ip", "")
+
+        # ── Source IP tracking ────────────────────────────────────────────────
+        if sip and sip not in ("-", "0.0.0.0", ""):
             source_ips.add(sip)
             ip_counts[sip] = ip_counts.get(sip, 0) + 1
 
-        if "sudo" in rgroups or "pam" in rgroups:
+        # ── Failed logins ─────────────────────────────────────────────────────
+        if (rid in SSH_FAILURE_RULES
+                or "authentication_failed" in rgroups
+                or "authentication_failures" in rgroups
+                or "login_denied" in rgroups):
+            failed_logins += 1
+
+        # ── Brute-force correlations ──────────────────────────────────────────
+        if (rid in BRUTE_FORCE_RULES
+                or "brute_force" in rgroups):
+            brute_force += 1
+
+        # ── Sudo / privilege escalation ───────────────────────────────────────
+        if (rid in SUDO_RULES
+                or "sudo" in rgroups
+                or "pam" in rgroups
+                or "privilege_escalation" in rgroups):
             sudo_events += 1
 
-        if "syscheck" in rgroups or "fim" in rgroups:
+        # ── File integrity (FIM) ──────────────────────────────────────────────
+        if ("syscheck" in rgroups
+                or "fim" in rgroups
+                or rid in {100020, 100021, 100022, 100023, 100040, 100041, 100042}):
             file_mods += 1
 
-        if "process_monitor" in rgroups or "ossec" in rgroups:
+        # ── Web attacks ───────────────────────────────────────────────────────
+        if (rid in WEB_ATTACK_RULES
+                or "web" in rgroups
+                or "sql_injection" in rgroups
+                or "xss" in rgroups
+                or "command_injection" in rgroups):
+            web_attacks += 1
+
+        # ── Lateral movement / recon ──────────────────────────────────────────
+        if (rid in LATERAL_RULES
+                or "recon" in rgroups
+                or "lateral_movement" in rgroups
+                or "firewall" in rgroups):
+            lateral += 1
+
+        # ── Persistence ───────────────────────────────────────────────────────
+        if (rid in PERSIST_RULES
+                or "persistence" in rgroups
+                or "adduser" in rgroups):
+            persistence += 1
+
+        # ── Process / execution anomalies ─────────────────────────────────────
+        if ("process_monitor" in rgroups
+                or "execution" in rgroups
+                or "ossec" in rgroups
+                or rid in {100070, 100071, 100072}):
             processes += 1
-            
-        # Generic threat counter (high level or specific attack groups)
-        if "attack" in rgroups or "exploit" in rgroups or e.get("rule_level", 0) >= 10:
+
+        # ── High-severity catch-all ───────────────────────────────────────────
+        if ("attack" in rgroups
+                or "exploit" in rgroups
+                or level >= 10):
             threats += 1
 
     top_ip = max(ip_counts, key=ip_counts.get) if ip_counts else None
 
     return {
-        "failed_logins":  failed_logins,
-        "unique_ips":     len(source_ips),
-        "sudo":           sudo_events,
-        "file_mods":      file_mods,
-        "process":        processes,
-        "threats":        threats,
-        "top_source_ip":  top_ip,
+        "failed_logins": failed_logins,
+        "brute_force":   brute_force,
+        "unique_ips":    len(source_ips),
+        "sudo":          sudo_events,
+        "file_mods":     file_mods,
+        "web_attacks":   web_attacks,
+        "lateral":       lateral,
+        "persistence":   persistence,
+        "process":       processes,
+        "threats":       threats,
+        "top_source_ip": top_ip,
     }
 
 
@@ -187,7 +281,7 @@ def build_features(client, window_minutes: int = 5) -> list[dict]:
         [
           {
             "agent":          "hostname",
-            "feature_vector": [int, int, int, int, int],  # FEATURE_NAMES order
+            "feature_vector": [int, ...],  # FEATURE_NAMES order (10 values)
             "features":       {"failed_logins": int, ...}
           },
           ...
@@ -244,7 +338,6 @@ def discover_agents(client) -> list[str]:
             "aggs": {
                 "agents": {
                     "terms": {
-                        # Use .keyword for exact-match on text fields
                         "field": "agent.name",
                         "size":  100,
                     }

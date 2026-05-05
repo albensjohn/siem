@@ -315,6 +315,45 @@ code,
   background: rgba(123, 97, 255, 0.1);
 }
 
+.nav-item.active.orange .active-indicator {
+  background: var(--orange);
+  box-shadow: 0 0 10px var(--orange);
+}
+
+.nav-item.active.orange .nav-btn {
+  color: var(--orange);
+  background: rgba(249, 115, 22, 0.1);
+}
+
+/* Alerts Console filter buttons */
+.alerts-filter-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 14px;
+  border-radius: 6px;
+  border: 1px solid rgba(255,255,255,0.1);
+  background: rgba(255,255,255,0.03);
+  color: var(--sentinel-grey);
+  font-size: 11px;
+  font-family: 'JetBrains Mono', monospace;
+  letter-spacing: 0.05em;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.alerts-filter-btn:hover {
+  border-color: rgba(0,240,255,0.3);
+  color: #fff;
+  background: rgba(0,240,255,0.05);
+}
+
+.alerts-filter-btn.active {
+  border-color: rgba(0,240,255,0.4);
+  color: var(--sentinel-cyan);
+  background: rgba(0,240,255,0.08);
+}
+
 .nav-tooltip {
   position: absolute;
   left: calc(100% + 16px);

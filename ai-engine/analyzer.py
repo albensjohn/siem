@@ -58,7 +58,7 @@ FEATURE_WINDOW = 5     # minutes of history per scan
 WARMUP_CYCLES  = 1     # cycles before first scoring
 OFFLINE_RETRY  = 10    # seconds between offline retries
 BOOT_DELAY     = 20    # seconds to wait for Indexer on first start
-CONTAMINATION  = 0.1   # IsolationForest anomaly fraction
+CONTAMINATION  = 0.05   # IsolationForest anomaly fraction (5% — more sensitive)
 MIN_SAMPLES    = 4     # minimum vectors needed to train (avoids sklearn crash)
 MAX_HISTORY    = 500   # cap history size to avoid unbounded memory growth
 
@@ -129,6 +129,15 @@ def load_model() -> IsolationForest | None:
     if os.path.exists(MODEL_FILE):
         try:
             m = joblib.load(MODEL_FILE)
+            # Shape guard: if model was trained on different N_FEATURES, discard it
+            expected = feature_builder.N_FEATURES
+            actual   = getattr(m, "n_features_in_", None)
+            if actual is not None and actual != expected:
+                logger.warning(
+                    "Model shape mismatch (saved=%d, current=%d) — will retrain.",
+                    actual, expected,
+                )
+                return None
             logger.info("Loaded persisted model from %s", MODEL_FILE)
             return m
         except Exception as exc:

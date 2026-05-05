@@ -226,9 +226,17 @@ function updateFooterStatus() {
 
 function updateTopBarEps() {
   const epsEl = document.getElementById('topbar-eps-val') || document.querySelector('.topbar-eps-value');
-  if (!epsEl || liveState.alerts.length === 0) return;
-  // Rough EPS estimate from alert count
-  epsEl.textContent = `${(liveState.alerts.length * 12).toLocaleString()} EPS`;
+  if (!epsEl) return;
+  if (liveState.alerts.length === 0) { epsEl.textContent = '— EPS'; return; }
+  // Calculate real EPS: count alerts in the last 60 seconds
+  const now = Date.now();
+  const recentAlerts = liveState.alerts.filter(h => {
+    const ts = h._source?.['@timestamp'];
+    return ts && (now - new Date(ts).getTime()) < 60000;
+  });
+  epsEl.textContent = recentAlerts.length > 0
+    ? `${recentAlerts.length} EPS`
+    : `${Math.round(liveState.alerts.length / 60)} avg/min`;
 }
 
 // ============================================================
@@ -299,16 +307,18 @@ async function initApp() {
 // SIDEBAR
 // ============================================================
 const navItems = [
-  { id: 'nexus', label: 'Nexus', icon: 'home' },
-  { id: 'hunter', label: 'Hunter', icon: 'radar' },
-  { id: 'fleet', label: 'Fleet', icon: 'server' },
-  { id: 'shield', label: 'Shield', icon: 'shield' },
-  { id: 'matrix', label: 'Matrix', icon: 'grid-2x2' },
+  { id: 'nexus',   label: 'Nexus',   icon: 'home' },
+  { id: 'alerts',  label: 'Alerts',  icon: 'bell' },
+  { id: 'hunter',  label: 'Hunter',  icon: 'radar' },
+  { id: 'fleet',   label: 'Fleet',   icon: 'server' },
+  { id: 'shield',  label: 'Shield',  icon: 'shield' },
+  { id: 'matrix',  label: 'Matrix',  icon: 'grid-2x2' },
 ];
 
 function renderSidebar() {
   const sidebar = document.getElementById('sidebar');
   const isPurple = (id) => id === 'matrix' || id === 'hunter';
+  const isOrange = (id) => id === 'alerts';
 
   sidebar.innerHTML = `
     <div class="sidebar-logo">S</div>
@@ -323,7 +333,7 @@ function renderSidebar() {
   const nav = document.getElementById('sidebar-nav');
   navItems.forEach(item => {
     const div = document.createElement('div');
-    div.className = `nav-item${isPurple(item.id) ? ' purple' : ''}`;
+    div.className = `nav-item${isPurple(item.id) ? ' purple' : ''}${isOrange(item.id) ? ' orange' : ''}`;
     div.id = `nav-${item.id}`;
     div.innerHTML = `
       <div class="active-indicator"></div>
@@ -431,19 +441,8 @@ function drawSparkline() {
 // FOOTER
 // ============================================================
 function renderFooter() {
-  const footer = document.getElementById('footer');
-  footer.innerHTML = `
-    <div class="footer-left">
-      <div class="footer-item"><span class="footer-dot"></span><span>K8S_PRIMARY: ACTIVE</span></div>
-      <div class="footer-item"><span class="footer-dot"></span><span>SIEM_PIPELINE: STREAMING</span></div>
-      <div class="footer-item"><span class="footer-dot cyan"></span><span>AI_MODELS: v2.4.1_STABLE</span></div>
-    </div>
-    <div class="footer-right">
-      <span>LATENCY: 12ms</span>
-      <span>UPTIME: 99.999%</span>
-      <span class="footer-version">SENTINEL OS v4.0.2</span>
-    </div>
-  `;
+  // Render the real state immediately — updateFooterStatus() will also refresh this
+  updateFooterStatus();
 }
 
 // ============================================================
@@ -456,7 +455,8 @@ function renderTab(tab) {
   if (shieldChart) { shieldChart.destroy(); shieldChart = null; }
 
   switch (tab) {
-    case 'nexus': content.innerHTML = buildNexusTab(); setTimeout(initNexusTab, 50); break;
+    case 'nexus':  content.innerHTML = buildNexusTab();  setTimeout(initNexusTab, 50);  break;
+    case 'alerts': content.innerHTML = buildAlertsTab(); setTimeout(initAlertsTab, 50); break;
     case 'hunter': content.innerHTML = buildHunterTab(); setTimeout(initHunterTab, 50); break;
     // Fleet: build HTML first, then run both post-DOM helpers
     case 'fleet':
@@ -532,33 +532,32 @@ function buildNexusTab() {
           </div>
         </div>
 
-        <!-- Stats Column -->
         <div class="nexus-stats-col">
           <div class="glass-card nexus-stat-card">
             <div class="nexus-stat-header">
               <div>
                 <div class="nexus-stat-label">Active Agents</div>
-                <div class="nexus-stat-value">42<span class="sub">/42</span></div>
+                <div class="nexus-stat-value" id="nexus-agent-val">—<span class="sub">/—</span></div>
               </div>
               <div class="nexus-stat-icon emerald">${lucideIcon('globe', 20)}</div>
             </div>
             <div class="nexus-status-row">
-              <div class="nexus-status-dot"></div>
-              <span class="nexus-status-text">ALL SYSTEMS NOMINAL</span>
+              <div class="nexus-status-dot" id="nexus-status-dot"></div>
+              <span class="nexus-status-text" id="nexus-status-text">Connecting to Wazuh...</span>
             </div>
           </div>
           <div class="glass-card nexus-stat-card">
             <div class="nexus-stat-header">
               <div>
                 <div class="nexus-stat-label">Current Risk</div>
-                <div class="nexus-stat-value cyan">12.4 <span class="sub">/100</span></div>
+                <div class="nexus-stat-value cyan" id="nexus-risk-val">— <span class="sub">/100</span></div>
               </div>
               <div class="nexus-stat-icon cyan">${lucideIcon('shield-alert', 20)}</div>
             </div>
             <div class="nexus-risk-bar-track">
               <div class="nexus-risk-bar" id="nexus-risk-bar"></div>
             </div>
-            <div class="nexus-risk-note">Low threat trajectory confirmed</div>
+            <div class="nexus-risk-note" id="nexus-risk-note">Waiting for AI Engine...</div>
           </div>
         </div>
       </div>
@@ -598,19 +597,32 @@ function buildNexusTab() {
 }
 
 function initNexusTab() {
-  const bar = document.getElementById('nexus-risk-bar');
   // --- LIVE: use global_risk from AI engine (0–1 scale → %) ---
   const globalRisk = liveState.aiRisks.global_risk;
+  const bar     = document.getElementById('nexus-risk-bar');
+  const riskVal = document.getElementById('nexus-risk-val');
+  const riskNote = document.getElementById('nexus-risk-note');
+
   if (bar) {
-    const pct = globalRisk != null ? (globalRisk * 100).toFixed(1) : 12.4;
-    bar.style.width = pct + '%';
-    const riskNote = document.querySelector('.nexus-risk-note');
-    const riskVal = document.querySelector('.nexus-stat-value.cyan');
-    if (riskVal) riskVal.innerHTML = `${pct} <span class="sub">/100</span>`;
-    if (riskNote) {
-      const status = liveState.aiRisks.status || 'OK';
-      const label = globalRisk >= 0.8 ? 'CRITICAL threat level' : globalRisk >= 0.6 ? 'HIGH risk detected' : globalRisk >= 0.4 ? 'MEDIUM risk — monitor' : 'Low threat trajectory confirmed';
-      riskNote.textContent = status === 'LEARNING' ? 'AI Engine warming up — collecting baseline...' : status === 'DEGRADED' ? 'AI Engine degraded — showing last known state' : label;
+    if (globalRisk != null) {
+      const pct = (globalRisk * 100).toFixed(1);
+      bar.style.width = pct + '%';
+      if (riskVal) riskVal.innerHTML = `${pct} <span class="sub">/100</span>`;
+      if (riskNote) {
+        const status = liveState.aiRisks.status || 'OK';
+        const label = globalRisk >= 0.8 ? 'CRITICAL threat level'
+          : globalRisk >= 0.6 ? 'HIGH risk detected'
+          : globalRisk >= 0.4 ? 'MEDIUM risk — monitor'
+          : 'Low threat trajectory confirmed';
+        riskNote.textContent = status === 'LEARNING' ? 'AI Engine warming up — collecting baseline...'
+          : status === 'DEGRADED' ? 'AI Engine degraded — showing last known state'
+          : label;
+      }
+    } else {
+      bar.style.width = '0%';
+      if (riskNote) riskNote.textContent = liveState.aiRisks.status === 'LEARNING'
+        ? 'AI Engine warming up — collecting baseline...'
+        : 'AI Engine offline — start ai-engine service';
     }
   }
 
@@ -648,14 +660,170 @@ function initNexusTab() {
   }
 
   // --- LIVE: update active agents count ---
+  const agentValEl  = document.getElementById('nexus-agent-val');
+  const statusDotEl = document.getElementById('nexus-status-dot');
+  const statusTxtEl = document.getElementById('nexus-status-text');
   if (liveState.agents.length > 0) {
     const activeCount = liveState.agents.filter(a => a.status === 'active').length;
     const total = liveState.agents.length;
-    const valEl = document.querySelector('.nexus-stat-value');
-    if (valEl) valEl.innerHTML = `${activeCount}<span class="sub">/${total}</span>`;
-    const statusEl = document.querySelector('.nexus-status-text');
-    if (statusEl) statusEl.textContent = activeCount === total ? 'ALL SYSTEMS NOMINAL' : `${total - activeCount} AGENT(S) OFFLINE`;
+    if (agentValEl) agentValEl.innerHTML = `${activeCount}<span class="sub">/${total}</span>`;
+    if (statusTxtEl) statusTxtEl.textContent = activeCount === total ? 'ALL SYSTEMS NOMINAL' : `${total - activeCount} AGENT(S) OFFLINE`;
+    if (statusDotEl && activeCount < total) statusDotEl.style.background = '#FF2E63';
+  } else {
+    if (agentValEl) agentValEl.innerHTML = `—<span class="sub">/—</span>`;
+    if (statusTxtEl) statusTxtEl.textContent = 'Wazuh Manager offline';
+    if (statusDotEl) statusDotEl.style.background = '#FF2E63';
   }
+}
+
+// ============================================================
+// ALERTS TAB — Live Wazuh Alert Console
+// ============================================================
+let alertsFilter = 0; // minimum level filter
+let alertsExpanded = null; // expanded row index
+
+function buildAlertsTab() {
+  const counts = { all: liveState.alerts.length, crit: 0, high: 0, med: 0 };
+  liveState.alerts.forEach(h => {
+    const l = h._source?.rule?.level ?? 0;
+    if (l >= 13) counts.crit++;
+    else if (l >= 10) counts.high++;
+    else if (l >= 7) counts.med++;
+  });
+
+  return `
+    <div style="display:flex;flex-direction:column;gap:16px;height:100%">
+      <!-- Header -->
+      <div style="display:flex;justify-content:space-between;align-items:center;flex-shrink:0">
+        <div>
+          <h2 style="font-size:18px;font-weight:700;color:#fff;margin:0;display:flex;align-items:center;gap:8px">
+            ${lucideIcon('bell', 18)} Live Alerts Console
+          </h2>
+          <p style="font-size:12px;color:#606060;margin:4px 0 0">Real-time Wazuh alert stream — auto-refreshes every 10s</p>
+        </div>
+        <button class="activity-export" onclick="exportLogsCSV()">EXPORT CSV</button>
+      </div>
+
+      <!-- Filter bar -->
+      <div style="display:flex;gap:8px;flex-shrink:0;flex-wrap:wrap">
+        <button id="af-all"  class="alerts-filter-btn active" onclick="setAlertsFilter(0)">
+          ALL &nbsp;<span style="opacity:.6">${counts.all}</span>
+        </button>
+        <button id="af-med"  class="alerts-filter-btn" onclick="setAlertsFilter(7)">
+          ${lucideIcon('alert-triangle',12)} MED+ &nbsp;<span style="opacity:.6">${counts.med + counts.high + counts.crit}</span>
+        </button>
+        <button id="af-high" class="alerts-filter-btn" style="border-color:rgba(249,115,22,.4);color:#f97316" onclick="setAlertsFilter(10)">
+          ${lucideIcon('alert-triangle',12)} HIGH+ &nbsp;<span style="opacity:.6">${counts.high + counts.crit}</span>
+        </button>
+        <button id="af-crit" class="alerts-filter-btn" style="border-color:rgba(255,46,99,.4);color:#FF2E63" onclick="setAlertsFilter(13)">
+          ${lucideIcon('zap',12)} CRITICAL &nbsp;<span style="opacity:.6">${counts.crit}</span>
+        </button>
+        <div style="margin-left:auto;font-size:11px;color:#606060;display:flex;align-items:center;gap:6px">
+          <div style="width:6px;height:6px;border-radius:50%;background:#10B981;animation:pulse 2s infinite"></div>
+          Live · Updated ${new Date().toLocaleTimeString()}
+        </div>
+      </div>
+
+      <!-- Table -->
+      <div class="glass-card" style="flex:1;overflow:hidden;display:flex;flex-direction:column;padding:0">
+        <div style="overflow-x:auto;overflow-y:auto;flex:1" id="alerts-table-wrap">
+          <table style="width:100%;border-collapse:collapse;font-size:12px">
+            <thead style="position:sticky;top:0;z-index:2">
+              <tr style="background:#0d0d14;border-bottom:1px solid rgba(255,255,255,0.08)">
+                <th style="padding:10px 14px;text-align:left;font-size:10px;color:#606060;font-weight:400;letter-spacing:1px;white-space:nowrap">TIME</th>
+                <th style="padding:10px 14px;text-align:left;font-size:10px;color:#606060;font-weight:400;letter-spacing:1px">AGENT</th>
+                <th style="padding:10px 14px;text-align:left;font-size:10px;color:#606060;font-weight:400;letter-spacing:1px">RULE ID</th>
+                <th style="padding:10px 14px;text-align:center;font-size:10px;color:#606060;font-weight:400;letter-spacing:1px">LVL</th>
+                <th style="padding:10px 14px;text-align:left;font-size:10px;color:#606060;font-weight:400;letter-spacing:1px">DESCRIPTION</th>
+                <th style="padding:10px 14px;text-align:left;font-size:10px;color:#606060;font-weight:400;letter-spacing:1px">SRC IP</th>
+                <th style="padding:10px 14px;text-align:left;font-size:10px;color:#606060;font-weight:400;letter-spacing:1px">GROUPS</th>
+              </tr>
+            </thead>
+            <tbody id="alerts-tbody"></tbody>
+          </table>
+          <div id="alerts-empty" style="display:none;padding:40px;text-align:center;color:#606060">
+            ${lucideIcon('inbox', 32)}<br><br>No alerts match this filter.
+          </div>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function initAlertsTab() {
+  alertsFilter = 0;
+  alertsExpanded = null;
+  renderAlertsTable();
+}
+
+function setAlertsFilter(level) {
+  alertsFilter = level;
+  // Update button active states
+  ['af-all','af-med','af-high','af-crit'].forEach(id => {
+    const btn = document.getElementById(id);
+    if (btn) btn.classList.remove('active');
+  });
+  const target = level === 0 ? 'af-all' : level === 7 ? 'af-med' : level === 10 ? 'af-high' : 'af-crit';
+  const tBtn = document.getElementById(target);
+  if (tBtn) tBtn.classList.add('active');
+  renderAlertsTable();
+}
+
+function renderAlertsTable() {
+  const tbody = document.getElementById('alerts-tbody');
+  const emptyEl = document.getElementById('alerts-empty');
+  if (!tbody) return;
+
+  const filtered = liveState.alerts.filter(h => (h._source?.rule?.level ?? 0) >= alertsFilter);
+
+  if (filtered.length === 0) {
+    tbody.innerHTML = '';
+    if (emptyEl) emptyEl.style.display = 'block';
+    return;
+  }
+  if (emptyEl) emptyEl.style.display = 'none';
+
+  tbody.innerHTML = filtered.slice(0, 200).map((hit, idx) => {
+    const s    = hit._source || {};
+    const lvl  = s.rule?.level ?? 0;
+    const desc = s.rule?.description || 'Unknown';
+    const agent= s.agent?.name || 'manager';
+    const ts   = s['@timestamp'] ? new Date(s['@timestamp']).toLocaleTimeString() : '—';
+    const rId  = s.rule?.id || '—';
+    const srcIp= s.data?.srcip || s.data?.src_ip || '—';
+    const groups = Array.isArray(s.rule?.groups) ? s.rule.groups.slice(0,3).join(', ') : (s.rule?.groups || '—');
+
+    const lvlColor = lvl >= 13 ? '#FF2E63' : lvl >= 10 ? '#f97316' : lvl >= 7 ? '#EAB308' : '#10B981';
+    const lvlBg    = lvl >= 13 ? 'rgba(255,46,99,.12)' : lvl >= 10 ? 'rgba(249,115,22,.12)' : lvl >= 7 ? 'rgba(234,179,8,.1)' : 'rgba(16,185,129,.08)';
+    const isExp    = alertsExpanded === idx;
+
+    const raw = JSON.stringify(s, null, 2)
+      .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+
+    return `
+      <tr class="alerts-row" onclick="toggleAlertRow(${idx})" style="cursor:pointer;border-bottom:1px solid rgba(255,255,255,0.04);transition:background .15s"
+          onmouseenter="this.style.background='rgba(255,255,255,0.02)'" onmouseleave="this.style.background=''">
+        <td style="padding:9px 14px;color:#606060;white-space:nowrap;font-size:11px">${ts}</td>
+        <td style="padding:9px 14px;color:#e0e0e0;white-space:nowrap">${agent}</td>
+        <td style="padding:9px 14px;color:#00F0FF;font-family:monospace;white-space:nowrap">${rId}</td>
+        <td style="padding:9px 14px;text-align:center">
+          <span style="display:inline-block;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:700;color:${lvlColor};background:${lvlBg}">${lvl}</span>
+        </td>
+        <td style="padding:9px 14px;color:#c0c0c0;max-width:300px">
+          <div style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${desc.replace(/"/g,'&quot;')}">${desc}</div>
+        </td>
+        <td style="padding:9px 14px;color:#A0A0A0;font-family:monospace;white-space:nowrap;font-size:11px">${srcIp}</td>
+        <td style="padding:9px 14px;color:#7B61FF;font-size:10px;max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${groups}</td>
+      </tr>
+      ${isExp ? `<tr><td colspan="7" style="padding:0;background:rgba(0,240,255,0.03);border-bottom:1px solid rgba(0,240,255,0.1)">
+        <pre style="margin:0;padding:14px 20px;font-size:11px;color:#A0A0A0;overflow-x:auto;line-height:1.6;white-space:pre-wrap;word-break:break-all">${raw}</pre>
+      </td></tr>` : ''}`;
+  }).join('');
+}
+
+function toggleAlertRow(idx) {
+  alertsExpanded = alertsExpanded === idx ? null : idx;
+  renderAlertsTable();
 }
 
 // ============================================================
@@ -1796,13 +1964,11 @@ function buildShieldTab() {
           </div>
           <div class="glass-card shield-reco-card">
             <div class="shield-reco-title">Hardening Recommendations</div>
-            <div class="shield-reco-item">
-              <div class="shield-reco-icon" style="color:#7B61FF">${lucideIcon('terminal', 14)}</div>
-              <p class="shield-reco-text">Disable root SSH login on all nodes in <span class="highlight">PROD-ZONE-B</span>.</p>
-            </div>
-            <div class="shield-reco-item">
-              <div class="shield-reco-icon" style="color:#f97316">${lucideIcon('alert-triangle', 14)}</div>
-              <p class="shield-reco-text">Review open ports on <span class="highlight">K8S-LB</span>.</p>
+            <div id="shield-reco-content">
+              <div class="shield-reco-item">
+                <div class="shield-reco-icon" style="color:#606060">${lucideIcon('loader', 14)}</div>
+                <p class="shield-reco-text">Analysing alert data...</p>
+              </div>
             </div>
           </div>
         </div>
@@ -1882,6 +2048,56 @@ function initShieldTab() {
     if (scoreEl) scoreEl.textContent = riskPct + '%';
     const aiRisk = liveState.aiRisks?.global_risk;
     if (aiEl) aiEl.textContent = aiRisk != null ? liveState.aiRisks.agents?.[0]?.risk || '—' : '—';
+
+    // --- LIVE: Dynamic hardening recommendations ---
+    const recoEl = document.getElementById('shield-reco-content');
+    if (recoEl) {
+      // Scan alert groups for categories
+      const grpCounts = {};
+      liveState.alerts.forEach(hit => {
+        const groups = hit._source?.rule?.groups || [];
+        const arr = Array.isArray(groups) ? groups : [groups];
+        arr.forEach(g => { grpCounts[g] = (grpCounts[g] || 0) + 1; });
+      });
+      const has = g => (grpCounts[g] || 0) > 0;
+
+      const recs = [];
+      const authFails = (grpCounts['authentication_failed'] || 0) + (grpCounts['authentication_failures'] || 0);
+      if (authFails > 10 || has('brute_force')) {
+        recs.push({ icon: 'shield', color: '#FF2E63',
+          text: `High authentication failure rate (<strong>${authFails}</strong> events). Enable fail2ban, disable password auth, enforce SSH key-only login.` });
+      }
+      if (has('sudo') || has('privilege_escalation')) {
+        recs.push({ icon: 'lock', color: '#f97316',
+          text: `Privilege escalation activity detected. Audit <code>/etc/sudoers</code> and limit sudo access to essential users only.` });
+      }
+      if (has('syscheck') || has('fim')) {
+        recs.push({ icon: 'file-search', color: '#EAB308',
+          text: `File integrity changes detected. Review modified paths in the FIM alerts and verify no unauthorized changes.` });
+      }
+      if (has('web') || has('sql_injection') || has('xss') || has('command_injection')) {
+        recs.push({ icon: 'shield-alert', color: '#f97316',
+          text: `Web attack patterns detected (SQLi/XSS/CMDi). Review WAF configuration and input validation on exposed services.` });
+      }
+      if (has('persistence') || has('adduser')) {
+        recs.push({ icon: 'alert-triangle', color: '#FF2E63',
+          text: `Persistence mechanism activity detected. Audit cron jobs, new user accounts, and SSH authorized_keys files.` });
+      }
+      if (has('lateral_movement') || has('recon')) {
+        recs.push({ icon: 'radar', color: '#7B61FF',
+          text: `Lateral movement or recon activity detected. Review internal network segmentation and firewall rules.` });
+      }
+      if (recs.length === 0) {
+        recs.push({ icon: 'check-circle', color: '#10B981',
+          text: `No critical findings in the current alert window. Continue monitoring \u2014 system appears stable.` });
+      }
+
+      recoEl.innerHTML = recs.map(r => `
+        <div class="shield-reco-item">
+          <div class="shield-reco-icon" style="color:${r.color}">${lucideIcon(r.icon, 14)}</div>
+          <p class="shield-reco-text">${r.text}</p>
+        </div>`).join('');
+    }
   }
 
   const canvas = document.getElementById('shield-chart');
