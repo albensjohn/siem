@@ -237,6 +237,8 @@ async function refreshLiveData() {
         threatOverlay.style.color = hasCrit ? '#FF2E63' : '#00F0FF';
         threatOverlay.textContent = hasCrit ? 'CRITICAL THREATS ACTIVE' : 'ALL SYSTEMS NOMINAL';
       }
+    } else if (activeTab === 'shield') {
+      initShieldTab();
     } else {
       renderTab(activeTab);
     }
@@ -474,7 +476,7 @@ function renderTopBar() {
       <div class="topbar-user">
         <div class="topbar-avatar">${lucideIcon('user', 16)}</div>
         <div>
-          <div class="topbar-user-name">Eng_Alpha_01</div>
+          <div class="topbar-user-name">Sys_Admin</div>
           <div class="topbar-user-role">Level 4 Clearance</div>
         </div>
       </div>
@@ -958,6 +960,22 @@ function buildInsightText(agent) {
       : `No individual feature exceeded baseline — anomaly is a combined pattern.`);
 }
 
+// ── Recommended action text builder ───────────────────────────────────────────
+function getRecommendedActionText(domFeature) {
+  switch (domFeature) {
+    case 'failed_logins': return 'Review authentication logs and enforce password rotation. Consider temporary account lockouts.';
+    case 'brute_force':   return 'Enforce temporary IP ban or require MFA immediately to block automated guessing.';
+    case 'sudo':          return 'Review sudoers file and revoke unauthorized elevated privileges. Audit recent command history.';
+    case 'file_mods':     return 'Investigate modified critical files via FIM. Restore known good backups if tampered.';
+    case 'web_attacks':   return 'Enable Web Application Firewall (WAF) blocking mode for offending source IPs.';
+    case 'lateral':       return 'Isolate agent network access. Investigate East-West traffic and compromised credentials.';
+    case 'persistence':   return 'Analyze cron jobs, startup scripts, and registry keys. Remove unauthorized persistence mechanisms.';
+    case 'process':       return 'Terminate suspicious processes. Isolate endpoint and run full malware analysis.';
+    case 'threats':       return 'Immediate isolation required. High-severity threats detected requiring manual intervention.';
+    default:              return 'Monitor for escalation and review recent SIEM alerts for context.';
+  }
+}
+
 // ============================================================
 // HUNTER TAB
 // ============================================================
@@ -989,6 +1007,19 @@ function buildHunterTab() {
   selectedAlertId = selectedIdx; // Sync state
   const selected = agents[selectedIdx];
 
+  let formattedTime = 'Live';
+  if (liveState.aiRisks.timestamp) {
+    let ts = liveState.aiRisks.timestamp;
+    // If it's a unix epoch in seconds, convert to ms
+    if (typeof ts === 'number' && ts < 1e12) ts *= 1000;
+    const d = new Date(ts);
+    if (!isNaN(d.getTime())) {
+      formattedTime = d.toLocaleString('en-US', { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit', hour12: true });
+    } else {
+      formattedTime = ts;
+    }
+  }
+
   const alertCards = agents.map((a, i) => {
     const sev = a.risk === 'CRITICAL' ? 'high' : a.risk === 'HIGH' ? 'medium' : 'low';
     const scorePct = Math.round(a.score * 100);
@@ -997,7 +1028,6 @@ function buildHunterTab() {
          data-live-index="${i}" style="cursor:pointer">
       <div class="hunter-alert-top">
         <span class="hunter-score ${sev}">Score: ${scorePct}</span>
-        <span class="hunter-alert-time">Live</span>
       </div>
       <div class="hunter-alert-type">${a.agent}</div>
       <div class="hunter-alert-desc">Risk: ${a.risk} — ${a.dominant_feature}</div>
@@ -1038,7 +1068,7 @@ function buildHunterTab() {
                 </div>
                 <div class="hunter-meta-box">
                   <div class="hunter-meta-box-label">Timestamp</div>
-                  <div class="hunter-meta-box-value white" id="inspector-time">${liveState.aiRisks.timestamp || 'Just now'}</div>
+                  <div class="hunter-meta-box-value white" id="inspector-time">${formattedTime}</div>
                 </div>
                 <div class="hunter-meta-box">
                   <div class="hunter-meta-box-label">Events (Window)</div>
@@ -1070,10 +1100,10 @@ function buildHunterTab() {
               </div>
               <div class="hunter-action-card">
                 <div class="hunter-action-icon">${lucideIcon('zap', 24)}</div>
-                <div>
+                <div style="flex:1">
                   <div class="hunter-action-title">Recommended Action</div>
                   <div class="hunter-action-desc" id="inspector-action">
-                    ${selected.risk === 'CRITICAL' ? 'Immediate isolation required.' : 'Monitor for escalation.'}
+                    ${getRecommendedActionText(selected.dominant_feature)}
                   </div>
                 </div>
               </div>
@@ -1406,6 +1436,7 @@ function showAlertDetail(e, mockIdx, btn) {
     <button onclick="document.getElementById('alert-detail-bar').remove()" style="background:none;border:none;color:#606060;cursor:pointer;font-size:20px;padding:4px 8px;line-height:1">&times;</button>`;
   document.body.appendChild(bar);
 }
+
 
 // ── Agent Info Modal (Fleet hex click) ────────────────────────────────────────
 function showAgentModal(agentIdx) {
@@ -2030,31 +2061,7 @@ function buildFleetDistribution() {
 
 // ── MITRE Alert Banner (dynamic) ──────────────────────────────────────────────
 function buildMitreAlertBanner() {
-  const live = activeTechniques.filter(t =>
-    liveState.mitreTechniques.includes(t)
-  );
-  const hasThreat = live.length > 0;
-
-  const desc = hasThreat
-    ? `Sentinel detected <strong>${live.length}</strong> active technique(s) correlated from live Wazuh events: ${live.slice(0, 5).map(t => `<span class="highlight">${t}</span>`).join(', ')}.`
-    : `No confirmed active tactic chains from live events. Static baseline techniques (<span class="highlight">Brute Force</span>, <span class="highlight">Valid Accounts</span>) remain in watchlist.`;
-
-  const title = hasThreat ? 'Active Tactic Chain Detected' : 'No Live Tactic Chain';
-  const icon = hasThreat ? 'shield-alert' : 'shield';
-
-  return `
-    <div class="glass-card matrix-alert-card">
-      <div class="matrix-alert-inner">
-        <div class="matrix-alert-icon">${lucideIcon(icon, 24)}</div>
-        <div>
-          <div class="matrix-alert-title">${title}</div>
-          <p class="matrix-alert-desc">${desc}</p>
-          <div class="matrix-alert-actions">
-            <button class="matrix-btn-secondary">VIEW FULL ATTACK PATH</button>
-          </div>
-        </div>
-      </div>
-    </div>`;
+  return '';
 }
 
 // ── Export CSV (real data) ────────────────────────────────────────────────────
@@ -2101,9 +2108,8 @@ function buildShieldTab() {
       <td><span class="cve-severity-badge ${cve.severity.toLowerCase()}">${cve.severity}</span></td>
       <td class="cve-score">${cve.score}</td>
       <td class="cve-status">${cve.status}</td>
-      <td class="cve-action"><button class="cve-patch-btn">INSPECT</button></td>
     </tr>
-  `).join('') || '<tr><td colspan="6" style="text-align:center;padding:20px;color:#606060">No vulnerabilities detected (or connect to Wazuh)</td></tr>';
+  `).join('') || '<tr><td colspan="5" style="text-align:center;padding:20px;color:#606060">No vulnerabilities detected (or connect to Wazuh)</td></tr>';
 
   const stats = liveState.cveStats;
   const legendData = [
@@ -2180,8 +2186,8 @@ function buildShieldTab() {
           <table class="cve-table">
             <thead>
               <tr>
-                <th>CVE ID</th><th>Impacted Package</th><th>Severity</th>
-                <th>CVSS Score</th><th>Status</th><th>Action</th>
+                <th style="width:15%">CVE ID</th><th style="width:20%">Impacted Package</th><th style="width:15%">Severity</th>
+                <th style="width:10%">CVSS Score</th><th style="width:40%; text-align: justify; text-align-last: justify;">Status</th>
               </tr>
             </thead>
             <tbody>${cveRows}</tbody>
@@ -2194,8 +2200,8 @@ function buildShieldTab() {
 
 function initShieldTab() {
   // --- LIVE: compute vuln counts from alert levels ---
+  const counts = { Critical: 0, High: 0, Medium: 0, Low: 0 };
   if (liveState.alerts.length > 0) {
-    const counts = { Critical: 0, High: 0, Medium: 0, Low: 0 };
     liveState.alerts.forEach(hit => {
       const lvl = hit._source?.rule?.level ?? 0;
       if (lvl >= 13) counts.Critical++;
@@ -2223,7 +2229,6 @@ function initShieldTab() {
           <td><span class="cve-severity-badge ${sev.toLowerCase()}">${sev}</span></td>
           <td class="cve-score">${lvl}</td>
           <td class="cve-status">${desc.substring(0, 40)}${desc.length > 40 ? '…' : ''}</td>
-          <td class="cve-action"><button class="cve-patch-btn">INSPECT</button></td>
         </tr>`;
       }).join('');
       tbody.innerHTML = liveRows;
@@ -2295,37 +2300,59 @@ function initShieldTab() {
 
   const canvas = document.getElementById('shield-chart');
   if (!canvas) return;
-  if (shieldChart) shieldChart.destroy();
 
-  shieldChart = new Chart(canvas, {
-    type: 'doughnut',
-    data: {
-      labels: ['Critical', 'High', 'Medium', 'Low'],
-      datasets: [{
-        data: [liveState.cveStats.critical, liveState.cveStats.high, liveState.cveStats.medium, liveState.cveStats.low],
-        backgroundColor: ['#FF2E63', '#F97316', '#EAB308', '#00F0FF'],
-        borderWidth: 0,
-        hoverOffset: 8,
-      }]
-    },
-    options: {
-      cutout: '55%',
-      animation: { duration: 800 },
-      plugins: {
-        legend: { display: false },
-        tooltip: {
-          callbacks: {
-            label: ctx => ` ${ctx.label}: ${ctx.parsed}`
-          },
-          backgroundColor: '#121212',
-          borderColor: 'rgba(255,255,255,0.1)',
-          borderWidth: 1,
-          titleColor: '#fff',
-          bodyColor: '#A0A0A0',
+  const totalCve = counts.Critical + counts.High + counts.Medium + counts.Low;
+  const cLabels = totalCve > 0 ? ['Critical', 'High', 'Medium', 'Low'] : ['No Threats Detected'];
+  const cData = totalCve > 0 ? [counts.Critical, counts.High, counts.Medium, counts.Low] : [1];
+  const cColors = totalCve > 0 ? ['#FF2E63', '#F97316', '#EAB308', '#00F0FF'] : ['rgba(255,255,255,0.05)'];
+
+  const legendEl = document.querySelector('.shield-legend');
+  if (legendEl) {
+    legendEl.innerHTML = `
+      <div class="shield-legend-item"><div class="shield-legend-dot" style="background:#FF2E63"></div><span class="shield-legend-label">Critical: ${counts.Critical}</span></div>
+      <div class="shield-legend-item"><div class="shield-legend-dot" style="background:#F97316"></div><span class="shield-legend-label">High: ${counts.High}</span></div>
+      <div class="shield-legend-item"><div class="shield-legend-dot" style="background:#EAB308"></div><span class="shield-legend-label">Medium: ${counts.Medium}</span></div>
+      <div class="shield-legend-item"><div class="shield-legend-dot" style="background:#00F0FF"></div><span class="shield-legend-label">Low: ${counts.Low}</span></div>
+    `;
+  }
+
+  if (shieldChart) {
+    shieldChart.data.labels = cLabels;
+    shieldChart.data.datasets[0].data = cData;
+    shieldChart.data.datasets[0].backgroundColor = cColors;
+    shieldChart.options.plugins.tooltip.callbacks.label = ctx => ` ${ctx.label}: ${totalCve > 0 ? ctx.parsed : '0'}`;
+    shieldChart.update();
+  } else {
+    shieldChart = new Chart(canvas, {
+      type: 'doughnut',
+      data: {
+        labels: cLabels,
+        datasets: [{
+          data: cData,
+          backgroundColor: cColors,
+          borderWidth: 0,
+          hoverOffset: 8,
+        }]
+      },
+      options: {
+        cutout: '55%',
+        animation: { duration: 800 },
+        plugins: {
+          legend: { display: false },
+          tooltip: {
+            callbacks: {
+              label: ctx => ` ${ctx.label}: ${totalCve > 0 ? ctx.parsed : '0'}`
+            },
+            backgroundColor: '#121212',
+            borderColor: 'rgba(255,255,255,0.1)',
+            borderWidth: 1,
+            titleColor: '#fff',
+            bodyColor: '#A0A0A0',
+          }
         }
       }
-    }
-  });
+    });
+  }
 }
 
 // ============================================================

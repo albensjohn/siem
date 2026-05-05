@@ -53,29 +53,31 @@ Add your OpenRouter API key inside `.env`.
 
 ---
 
-### 2️⃣ Generate Wazuh Certificates (Docker Deployment)
+### 2️⃣ Start the Stack
 
-```bash
-docker compose -f generate-indexer-certs.yml run --rm generator
-```
+**If running on Linux with the helper script:**
 
----
-
-### 3️⃣ Start the Stack
-
-```bash
-docker compose up -d --build
-```
-
-If running on Linux with helper script:
+The script automatically generates certificates and starts the stack.
 
 ```bash
 ./start.sh
 ```
 
+**Otherwise (Manual Startup):**
+
+1. Generate Wazuh Certificates:
+```bash
+docker compose -f generate-indexer-certs.yml run --rm generator
+```
+
+2. Start the Stack:
+```bash
+docker compose up -d --build
+```
+
 ---
 
-### 4️⃣ Configuring Arch Linux Agents (systemd-journald)
+### 3️⃣ Configuring Arch Linux Agents (systemd-journald)
 
 If your Wazuh agent is running on Arch Linux (or any OS where logs are exclusively in the `systemd` journal rather than `/var/log/auth.log`), the agent will be blind to SSH and authentication failures by default. 
 
@@ -107,8 +109,6 @@ The AI Engine calculates a **Global Risk Score** from 0% to 100%:
 This repository contains only the AI enhancement layer.
 
 Wazuh components (Manager, Indexer, Agents) must be installed separately and remain governed by their original license.
-
-All original code in this repository is released under the MIT License.
 
 ---
 

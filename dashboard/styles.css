@@ -2046,6 +2046,7 @@ code,
 .cve-table {
   width: 100%;
   border-collapse: collapse;
+  table-layout: fixed;
 }
 
 .cve-table th {
@@ -2059,9 +2060,7 @@ code,
   background: rgba(255, 255, 255, 0.005);
 }
 
-.cve-table th:last-child {
-  text-align: right;
-}
+
 
 .cve-table td {
   padding: 1rem 1.5rem;
@@ -2112,21 +2111,10 @@ code,
 .cve-status {
   color: var(--sentinel-grey);
   font-style: italic;
+  text-align: justify;
 }
 
-.cve-action {
-  text-align: right;
-}
 
-.cve-patch-btn {
-  font-size: 0.75rem;
-  color: rgba(255, 255, 255, 0.4);
-  transition: color 0.2s;
-}
-
-.cve-patch-btn:hover {
-  color: #fff;
-}
 
 /* ============================================================
    MATRIX TAB
