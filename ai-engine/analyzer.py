@@ -57,7 +57,7 @@ SCAN_INTERVAL  = 30    # seconds between normal scans
 FEATURE_WINDOW = 5     # minutes of history per scan
 WARMUP_CYCLES  = 1     # cycles before first scoring
 OFFLINE_RETRY  = 10    # seconds between offline retries
-BOOT_DELAY     = 20    # seconds to wait for Indexer on first start
+BOOT_DELAY     = 5     # seconds to wait for Indexer on first start
 CONTAMINATION  = 0.05   # IsolationForest anomaly fraction (5% — more sensitive)
 MIN_SAMPLES    = 4     # minimum vectors needed to train (avoids sklearn crash)
 MAX_HISTORY    = 500   # cap history size to avoid unbounded memory growth
@@ -177,6 +177,16 @@ def run_engine() -> None:
     last_good_output: dict | None = None
     all_known_agents: set[str]    = set()
 
+    # Write an immediate STARTING status so the dashboard never sees a 404
+    # and shows a meaningful state rather than "OFFLINE" during boot.
+    write_output({
+        "timestamp":   utc_now(),
+        "status":      "STARTING",
+        "global_risk": None,
+        "agents":      [],
+        "message":     "AI Engine is starting up...",
+    })
+
     logger.info("AI Engine online — boot delay %ds.", BOOT_DELAY)
     time.sleep(BOOT_DELAY)
 
@@ -266,9 +276,20 @@ def run_engine() -> None:
 
             scored_agents = []
             for i, af in enumerate(agent_features):
-                score = normalise_score(float(raw_scores[i]))
-                risk  = classify_risk(score)
-                dom   = dominant_feature(af["feature_vector"], baseline)
+                fv_sum = sum(af["feature_vector"])
+
+                if fv_sum == 0:
+                    # Zero-activity agent: no events at all in this window.
+                    # IsolationForest returns decision_function≈0 for uniform
+                    # zero vectors → normalise_score(0) = 0.5 (BUG).
+                    # Zero activity is NOT anomalous — fix it explicitly.
+                    score = 0.0
+                    dom   = "none"
+                else:
+                    score = normalise_score(float(raw_scores[i]))
+                    dom   = dominant_feature(af["feature_vector"], baseline)
+
+                risk = classify_risk(score)
                 scored_agents.append({
                     "agent":            af["agent"],
                     "score":            round(score, 4),

@@ -93,14 +93,31 @@ async function apiFetchAgents() {
   } catch (e) { /* offline */ }
 }
 
+// alertsTimeWindow: '30m' | '1h' | '24h' — controls the OpenSearch query range
+let alertsTimeWindow = '30m';
+
 async function apiFetchAlerts() {
   try {
+    const windowMap = { '30m': 'now-30m', '1h': 'now-1h', '24h': 'now-24h' };
+    const since = windowMap[alertsTimeWindow] || 'now-30m';
     const query = {
-      size: 200,
+      size: 500,
       sort: [{ '@timestamp': 'desc' }],
-      query: { range: { 'rule.level': { gte: 3 } } },
+      query: {
+        bool: {
+          filter: [
+            { range: { 'rule.level': { gte: 3 } } },
+            { range: { '@timestamp': { gte: since } } }
+          ],
+          must_not: [
+            // Filter the dashboard's own Wazuh API auth calls — they pollute the stream
+            { term: { 'data.srcuser': 'wazuh-wui' } },
+            { match: { 'rule.description': 'wazuh-wui' } }
+          ]
+        }
+      },
       aggs: {
-        by_level: { terms: { field: 'rule.level', size: 20 } },
+        by_level:         { terms: { field: 'rule.level', size: 20 } },
         mitre_techniques: { terms: { field: 'rule.mitre.technique', size: 50 } },
       },
     };
@@ -110,13 +127,30 @@ async function apiFetchAlerts() {
       headers: { Authorization: `Basic ${creds}`, 'Content-Type': 'application/json' },
       body: JSON.stringify(query),
     });
-    if (!res.ok) return;
+    if (!res.ok) {
+      console.warn('[SENTINEL] Indexer query failed:', res.status, await res.text().catch(() => ''));
+      return;
+    }
     const d = await res.json();
     liveState.alerts = d.hits?.hits || [];
-    // Extract MITRE techniques from aggregation
+    console.log(`[SENTINEL] Alerts loaded: ${liveState.alerts.length} (window: ${alertsTimeWindow})`);
     const buckets = d.aggregations?.mitre_techniques?.buckets || [];
     liveState.mitreTechniques = buckets.map(b => b.key);
-  } catch (e) { /* offline */ }
+  } catch (e) {
+    console.warn('[SENTINEL] apiFetchAlerts error:', e.message);
+  }
+}
+
+function setAlertsTimeWindow(w) {
+  alertsTimeWindow = w;
+  ['tw-30m','tw-1h','tw-24h'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.classList.remove('active');
+  });
+  const active = document.getElementById('tw-' + w);
+  if (active) active.classList.add('active');
+  // Refetch immediately with new window
+  apiFetchAlerts().then(() => renderAlertsTable());
 }
 
 async function apiFetchAiRisks() {
@@ -205,10 +239,13 @@ function updateFooterStatus() {
   // FIX: Check status field, not just agents array
   const aiStatus = liveState.aiRisks.status;
   const aiOnline = aiStatus === 'OK' || aiStatus === 'LEARNING' || aiStatus === 'DEGRADED';
+  const aiStarting = aiStatus === 'STARTING';
 
   const mgrDot = mgrOnline ? '<span class="footer-dot"></span>' : '<span class="footer-dot" style="background:#FF2E63"></span>';
   const idxDot = idxOnline ? '<span class="footer-dot"></span>' : '<span class="footer-dot" style="background:#FF2E63"></span>';
-  const aiDot = aiOnline ? '<span class="footer-dot cyan"></span>' : '<span class="footer-dot" style="background:#f97316"></span>';
+  const aiDot  = aiOnline   ? '<span class="footer-dot cyan"></span>'
+               : aiStarting ? '<span class="footer-dot" style="background:#f59e0b"></span>'
+               :               '<span class="footer-dot" style="background:#FF2E63"></span>';
 
   footer.innerHTML = `
     <div class="footer-left">
@@ -705,7 +742,8 @@ function buildAlertsTab() {
       </div>
 
       <!-- Filter bar -->
-      <div style="display:flex;gap:8px;flex-shrink:0;flex-wrap:wrap">
+      <div style="display:flex;gap:8px;flex-shrink:0;flex-wrap:wrap;align-items:center">
+        <!-- Severity filters -->
         <button id="af-all"  class="alerts-filter-btn active" onclick="setAlertsFilter(0)">
           ALL &nbsp;<span style="opacity:.6">${counts.all}</span>
         </button>
@@ -718,6 +756,15 @@ function buildAlertsTab() {
         <button id="af-crit" class="alerts-filter-btn" style="border-color:rgba(255,46,99,.4);color:#FF2E63" onclick="setAlertsFilter(13)">
           ${lucideIcon('zap',12)} CRITICAL &nbsp;<span style="opacity:.6">${counts.crit}</span>
         </button>
+
+        <!-- Divider -->
+        <div style="width:1px;height:20px;background:rgba(255,255,255,0.08);margin:0 4px"></div>
+
+        <!-- Time window -->
+        <button id="tw-30m" class="alerts-filter-btn active" onclick="setAlertsTimeWindow('30m')">30 MIN</button>
+        <button id="tw-1h"  class="alerts-filter-btn" onclick="setAlertsTimeWindow('1h')">1 HR</button>
+        <button id="tw-24h" class="alerts-filter-btn" onclick="setAlertsTimeWindow('24h')">24 HR</button>
+
         <div style="margin-left:auto;font-size:11px;color:#606060;display:flex;align-items:center;gap:6px">
           <div style="width:6px;height:6px;border-radius:50%;background:#10B981;animation:pulse 2s infinite"></div>
           Live · Updated ${new Date().toLocaleTimeString()}
@@ -742,7 +789,14 @@ function buildAlertsTab() {
             <tbody id="alerts-tbody"></tbody>
           </table>
           <div id="alerts-empty" style="display:none;padding:40px;text-align:center;color:#606060">
-            ${lucideIcon('inbox', 32)}<br><br>No alerts match this filter.
+            ${lucideIcon('inbox', 32)}<br><br>
+            <strong style="color:#A0A0A0">No alerts in indexer.</strong><br><br>
+            <div style="font-size:11px;text-align:left;max-width:400px;margin:0 auto;line-height:2">
+              ${lucideIcon('check-circle',12)} Indexer: <span id="diag-indexer" style="color:#606060">checking...</span><br>
+              ${lucideIcon('check-circle',12)} Manager: <span id="diag-mgr" style="color:#606060">checking...</span><br>
+              ${lucideIcon('server',12)} Agent enrolled: check <code style="color:#00F0FF">sudo systemctl status wazuh-agent</code> on the client<br>
+              ${lucideIcon('terminal',12)} Manual test: run <code style="color:#00F0FF">ssh wronguser@localhost</code> on agent 5 times, wait 30s
+            </div>
           </div>
         </div>
       </div>
@@ -824,6 +878,51 @@ function renderAlertsTable() {
 function toggleAlertRow(idx) {
   alertsExpanded = alertsExpanded === idx ? null : idx;
   renderAlertsTable();
+}
+
+// ── Hunter insight text builder ───────────────────────────────────────────────
+// Generates a readable analysis from real feature vector data
+function buildInsightText(agent) {
+  const f = agent.features || {};
+  const score = Math.round((agent.score || 0) * 100);
+  const risk = agent.risk || 'LOW';
+  const dom = agent.dominant_feature || 'none';
+
+  if (score === 0 || dom === 'none') {
+    return `Agent <strong>${agent.agent}</strong> shows <span style="color:#10B981">no anomalous activity</span> in the current 5-minute window. All feature counters are zero — system is quiet.`;
+  }
+
+  // Build feature rows that have non-zero values
+  const LABELS = {
+    failed_logins: 'SSH/PAM Auth Failures',
+    brute_force:   'Brute-Force Correlations',
+    unique_ips:    'Unique Source IPs',
+    sudo:          'Sudo / Privilege Events',
+    file_mods:     'File Integrity (FIM) Changes',
+    web_attacks:   'Web Attack Events',
+    lateral:       'Lateral Movement / Recon',
+    persistence:   'Persistence Mechanism Events',
+    process:       'Suspicious Process Executions',
+    threats:       'High-Severity Events (lvl≥10)',
+  };
+
+  const activeFeatures = Object.entries(f)
+    .filter(([k, v]) => v > 0 && LABELS[k])
+    .map(([k, v]) => {
+      const isDom = k === dom;
+      return `<span style="display:inline-flex;justify-content:space-between;width:100%;gap:8px">` +
+        `<span style="color:${isDom ? '#FF2E63' : '#A0A0A0'}">${LABELS[k]}</span>` +
+        `<strong style="color:${isDom ? '#FF2E63' : '#00F0FF'}">${v}</strong></span>`;
+    });
+
+  const domLabel = LABELS[dom] || dom;
+  const riskCol = risk === 'CRITICAL' ? '#FF2E63' : risk === 'HIGH' ? '#f97316' : risk === 'MEDIUM' ? '#EAB308' : '#10B981';
+
+  return `Risk classified as <span style="color:${riskCol};font-weight:700">${risk}</span> (score: ${score}/100).<br>` +
+    `Primary driver: <span class="highlight">${domLabel}</span>.<br><br>` +
+    (activeFeatures.length > 0
+      ? `<span style="display:flex;flex-direction:column;gap:4px;font-size:11px">` + activeFeatures.join('') + `</span>`
+      : `No individual feature exceeded baseline — anomaly is a combined pattern.`);
 }
 
 // ============================================================
@@ -921,7 +1020,7 @@ function buildHunterTab() {
                   </div>
                   <p class="hunter-llm-text">
                     <span class="hunter-cursor">_</span>
-                    <span id="inspector-desc">Detected ${selected.risk} anomaly driven by <span class="highlight">${selected.dominant_feature}</span> deviation.</span>
+                    <span id="inspector-desc">${buildInsightText(selected)}</span>
                   </p>
                 </div>
               </div>
@@ -1654,15 +1753,72 @@ async function sendChatMessage() {
     </div>`);
   scrollChatToBottom();
 
-  // Build SIEM system context
-  const topAlerts = liveState.alerts.slice(0, 10).map(h => {
-    const s = h._source || {};
-    return `[L${s.rule?.level ?? 0}] ${s.rule?.description || '?'} — agent: ${s.agent?.name || 'mgr'}`;
-  }).join('\n') || 'No live alerts';
-  const aiSummary = liveState.aiRisks.agents?.slice(0, 5).map(e =>
-    `${e.agent}: ${e.risk} risk (${e.dominant_feature || '?'})`
-  ).join(', ') || 'AI engine offline';
-  const sysCtx = `You are SENTINEL AI, an expert SIEM security analyst assistant.\nYou have real-time access to the following live data from the SENTINEL SIEM platform:\n\nLIVE ALERTS (most recent 10):\n${topAlerts}\n\nAI RISK ANALYSIS:\n${aiSummary}\n\nACTIVE AGENTS: ${liveState.agents.length}\nGLOBAL RISK SCORE: ${liveState.aiRisks.global_risk != null ? (liveState.aiRisks.global_risk * 100).toFixed(1) + '/100' : 'unknown'}\n\nProvide concise, actionable security analysis. Use plain text with clear structure. Be direct and professional.`;
+  // ── Build rich SIEM context for LLM ─────────────────────────────────────
+  // Top alerts — exclude manager self-auth noise
+  const topAlerts = liveState.alerts
+    .filter(h => !(h._source?.data?.srcuser === 'wazuh-wui'))
+    .slice(0, 10)
+    .map(h => {
+      const s = h._source || {};
+      const lvl  = s.rule?.level ?? 0;
+      const desc = s.rule?.description || 'Unknown';
+      const agent = s.agent?.name || 'manager';
+      const srcip = s.data?.srcip || '';
+      const mitre = s.rule?.mitre?.id ? ` [MITRE: ${s.rule.mitre.id}]` : '';
+      return `  • [Level ${lvl}] ${desc} — on "${agent}"${srcip ? ', from ' + srcip : ''}${mitre}`;
+    }).join('\n') || '  No alerts in current window.';
+
+  // Per-agent feature vector summary
+  const agentDetails = liveState.aiRisks.agents?.map(e => {
+    const f = e.features || {};
+    const active = Object.entries(f)
+      .filter(([,v]) => v > 0)
+      .map(([k,v]) => `${k.replace(/_/g,' ')}=${v}`)
+      .join(', ');
+    return `  • ${e.agent}: score=${Math.round((e.score||0)*100)}%, risk=${e.risk}` +
+      (active ? `, active features: [${active}]` : ', quiet — no events detected');
+  }).join('\n') || '  No agents scored yet.';
+
+  const globalRisk = liveState.aiRisks.global_risk != null
+    ? Math.round(liveState.aiRisks.global_risk * 100) + '%'
+    : 'unknown';
+  const engineStatus = liveState.aiRisks.status || 'UNKNOWN';
+  const agentCount = liveState.agents.length;
+  const activeCount = liveState.agents.filter(a => a.status === 'active').length;
+
+  const sysCtx = `You are SENTINEL AI, a friendly security helper built into a SIEM dashboard.
+
+Your job is to help a junior security analyst (or a student) understand what's happening on their network. 
+Keep your answers SHORT, CLEAR, and SIMPLE. Avoid heavy technical jargon — if you must use a technical term, briefly explain it in brackets.
+Do NOT use bullet points with dashes. Use numbered steps or plain paragraphs.
+Never say "as an AI" or "I cannot". Just answer helpfully.
+
+Here is what is happening RIGHT NOW in the system:
+
+RECENT ALERTS (last ${alertsTimeWindow}):
+${topAlerts}
+
+ANOMALY DETECTION — per agent (Isolation Forest ML model):
+${agentDetails}
+
+OVERALL:
+  Global risk score: ${globalRisk}
+  AI engine status: ${engineStatus}
+  Agents connected: ${activeCount}/${agentCount}
+
+FEATURE LEGEND (what the numbers mean):
+  failed_logins = SSH or password login failures
+  brute_force = rapid repeated failed logins (automated attack)
+  unique_ips = how many different IP addresses connected
+  sudo = privilege escalation commands run
+  file_mods = files changed on disk (File Integrity Monitoring)
+  web_attacks = SQL injection / XSS / web scan attempts
+  lateral = port scans or internal network recon
+  persistence = cron jobs, new users, SSH keys added
+  process = suspicious programs executed
+  threats = high severity events overall
+
+Answer the user's question based on the data above.`;
 
   // Build conversation history (Standard OpenAI format)
   // If history is empty, prepend system context as system message

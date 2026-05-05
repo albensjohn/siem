@@ -64,6 +64,13 @@ FEATURE_NAMES = [
 ]
 N_FEATURES = len(FEATURE_NAMES)
 
+# Rule groups that are purely internal Wazuh housekeeping noise.
+# We filter by RULE GROUP rather than agent name so that real security
+# events (SSH failures, PAM errors, etc.) on the manager host are still
+# processed — only the Wazuh API / wazuh-wui chatter is suppressed.
+MANAGER_NOISE_GROUPS: frozenset[str] = frozenset({
+    "wazuh", "wazuh_api", "wazuh-wui",
+})
 
 # ── Query builder ─────────────────────────────────────────────────────────────
 
@@ -299,7 +306,11 @@ def build_features(client, window_minutes: int = 5) -> list[dict]:
     parsed: list[dict] = []
     for hit in hits:
         e = _parse_hit(hit)
-        if e is not None:
+        # Only drop pure Wazuh-internal API noise (wazuh_api group).
+        # Real events on the manager host (SSH failures, PAM errors, etc.)
+        # must still be processed — filtering by agent name would silently
+        # drop all those alerts.
+        if e is not None and not (e["rule_groups"] & MANAGER_NOISE_GROUPS):
             parsed.append(e)
 
     # Deduplicate
