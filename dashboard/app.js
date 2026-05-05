@@ -220,14 +220,48 @@ async function apiFetchVulnerabilities() {
 
 async function refreshLiveData() {
   await Promise.all([apiFetchAgents(), apiFetchAlerts(), apiFetchAiRisks(), apiFetchVulnerabilities()]);
-  // Re-render active tab with fresh data
   const content = document.getElementById('tab-content');
   if (content) {
-    renderTab(activeTab);
+    if (activeTab === 'alerts') {
+      updateAlertsCounts();
+      renderAlertsTable();
+    } else if (activeTab === 'nexus') {
+      initNexusTab();
+      const anomalyWrap = document.querySelector('.anomaly-bars');
+      if (anomalyWrap) anomalyWrap.innerHTML = buildAnomalyBars();
+      const mapStats = document.getElementById('map-stats-overlay');
+      if (mapStats) mapStats.innerHTML = `<p>AGENTS: <span style="color:#00F0FF">${liveState.agents.length || '0'}</span></p><p>ALERTS (24H): <span style="color:#FF2E63">${liveState.alerts.length || '0'}</span></p>`;
+      const threatOverlay = document.getElementById('map-threat-overlay');
+      if (threatOverlay) {
+        const hasCrit = liveState.alerts.some(h => (h._source?.rule?.level ?? 0) >= 13);
+        threatOverlay.style.color = hasCrit ? '#FF2E63' : '#00F0FF';
+        threatOverlay.textContent = hasCrit ? 'CRITICAL THREATS ACTIVE' : 'ALL SYSTEMS NOMINAL';
+      }
+    } else {
+      renderTab(activeTab);
+    }
     content.classList.add('visible');
   }
   updateFooterStatus();
   updateTopBarEps();
+}
+
+function updateAlertsCounts() {
+  const counts = { all: liveState.alerts.length, crit: 0, high: 0, med: 0 };
+  liveState.alerts.forEach(h => {
+    const l = h._source?.rule?.level ?? 0;
+    if (l >= 13) counts.crit++;
+    else if (l >= 10) counts.high++;
+    else if (l >= 7) counts.med++;
+  });
+  const afAll = document.getElementById('af-all');
+  if (afAll) afAll.innerHTML = `ALL &nbsp;<span style="opacity:.6">${counts.all}</span>`;
+  const afMed = document.getElementById('af-med');
+  if (afMed) afMed.innerHTML = `${lucideIcon('alert-triangle',12)} MED+ &nbsp;<span style="opacity:.6">${counts.med + counts.high + counts.crit}</span>`;
+  const afHigh = document.getElementById('af-high');
+  if (afHigh) afHigh.innerHTML = `${lucideIcon('alert-triangle',12)} HIGH+ &nbsp;<span style="opacity:.6">${counts.high + counts.crit}</span>`;
+  const afCrit = document.getElementById('af-crit');
+  if (afCrit) afCrit.innerHTML = `${lucideIcon('zap',12)} CRITICAL &nbsp;<span style="opacity:.6">${counts.crit}</span>`;
 }
 
 function updateFooterStatus() {
@@ -256,7 +290,7 @@ function updateFooterStatus() {
     <div class="footer-right">
       <span>AGENTS: ${liveState.agents.length || '—'}</span>
       <span>ALERTS: ${liveState.alerts.length || '—'}</span>
-      <span class="footer-version">SENTINEL OS v4.0.2</span>
+      <span class="footer-version">SENTINEL OS v1.0.2</span>
     </div>
   `;
 }
@@ -418,7 +452,7 @@ function renderTopBar() {
     <div class="topbar-brand">
       <div class="topbar-brand-dot"></div>
       <span class="topbar-brand-label">SENTINEL SIEM</span>
-      <span class="topbar-brand-version">v4.0.2</span>
+      <span class="topbar-brand-version">v1.0.2</span>
     </div>
     <div class="topbar-right">
       <div>
@@ -805,8 +839,7 @@ function buildAlertsTab() {
 }
 
 function initAlertsTab() {
-  alertsFilter = 0;
-  alertsExpanded = null;
+  // Do not reset filters here, so soft refreshes keep the user's state
   renderAlertsTable();
 }
 
@@ -1237,6 +1270,7 @@ function buildAnomalyBars() {
   }
 
   const maxVal = Math.max(...buckets, 1);
+  const now = Date.now();
   return buckets.map((count, i) => {
     const lvl = levelMap[i];
     const cls = lvl >= 10 ? 'anomaly' : lvl >= 7 ? 'warning' : '';
@@ -1245,7 +1279,10 @@ function buildAnomalyBars() {
     const style = pct
       ? `animation-delay:${delay}s;height:${pct}%;align-self:flex-end`
       : `animation-delay:${delay}s`;
-    return `<div class="anomaly-bar ${cls}" style="${style}" title="${count} alert${count !== 1 ? 's' : ''} at T-${SLOTS - 1 - i}min"></div>`;
+    
+    const minAgo = SLOTS - 1 - i;
+    const timeStr = new Date(now - (minAgo * 60000)).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
+    return `<div class="anomaly-bar ${cls}" style="${style}" title="${count} alert${count !== 1 ? 's' : ''} at ${timeStr}"></div>`;
   }).join('');
 }
 
